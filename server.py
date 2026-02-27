@@ -1,0 +1,1135 @@
+"""ZettleBank backend – FastAPI intelligence layer.
+
+Maintains a persistent NetworkX graph, runs multi-resolution Leiden
+community detection, and exposes /analyze for the Obsidian frontend.
+
+Smart Connections integration: reads .smart-env/multi/*.ajson for
+TaylorAI/bge-micro-v2 embeddings to find top-5 similar notes, then
+uses graph topology + neighbor data to propose tags and relations.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import math
+import os
+import re
+import uuid
+from collections import Counter
+from enum import Enum
+from pathlib import Path
+from typing import Optional
+
+import httpx as httpx_client
+import numpy as np
+import networkx as nx
+import spacy
+from bertopic import BERTopic
+from fastapi import FastAPI, HTTPException
+from leidenalg import find_partition, RBConfigurationVertexPartition
+from pydantic import BaseModel, Field
+from sklearn.cluster import KMeans
+from sklearn.decomposition import TruncatedSVD
+from sklearn.feature_extraction.text import CountVectorizer
+import igraph as ig
+
+logger = logging.getLogger("zettlebank")
+
+# ---------------------------------------------------------------------------
+# Constants – Controlled vocabularies from architecture.md
+# ---------------------------------------------------------------------------
+
+RELATION_TYPES = {
+    "contradicts",
+    "supports",
+    "potential_to",
+    "kinetic_to",
+    "motivates",
+    "hinders",
+    "related",  # default fallback per ADR-002
+}
+
+# Leiden resolution tiers (ADR-001)
+#   γ ≈ 2.0  → Micro-clusters: scene beats, local motifs
+#   γ ≈ 1.0  → Mid-level (default)
+#   γ ≈ 0.5  → Macro-clusters: global themes, acts
+RESOLUTION_MICRO = 2.0
+RESOLUTION_MACRO = 0.5
+
+# ---------------------------------------------------------------------------
+# Environment config – override any value via .env or shell environment
+# ---------------------------------------------------------------------------
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / ".env")
+except ImportError:
+    pass  # python-dotenv optional; fall back to os.environ / defaults
+
+_VAULT_DIR = os.environ.get("VAULT_DIR", "choracle-remote-00")
+
+# Graph persistence path
+GRAPH_PATH = Path(__file__).parent / "vault_graph.json"
+
+# Smart Connections data path
+SMART_ENV_DIR   = Path(__file__).parent / _VAULT_DIR / ".smart-env" / "multi"
+EMBED_MODEL_KEY = os.environ.get("EMBED_MODEL_KEY", "TaylorAI/bge-micro-v2")
+
+# Vault notes directory (for BERTopic fitting)
+VAULT_NOTES_DIR = Path(__file__).parent / _VAULT_DIR / "notes"
+
+# BERTopic persistence path
+BERTOPIC_PATH = Path(__file__).parent / "bertopic_model"
+
+# Ollama settings
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL    = os.environ.get("OLLAMA_MODEL",    "llama3.2")
+
+# spaCy model
+SPACY_MODEL = os.environ.get("SPACY_MODEL", "en_core_web_sm")
+
+# spaCy entity type → aspect category mapping
+SPACY_TO_ASPECT: dict[str, str] = {
+    "GPE": "place",
+    "LOC": "place",
+    "FAC": "place",
+    "PERSON": "character",
+    "ORG": "character",
+    "NORP": "character",
+    "DATE": "time",
+    "TIME": "time",
+    "EVENT": "time",
+    "PRODUCT": "object",
+    "WORK_OF_ART": "object",
+    "LAW": "object",
+}
+
+ASPECT_TYPES = {"place", "time", "character", "object"}
+AFFECT_VALUES = {"positive", "negative", "mu"}
+CODE_VALUES = {"qi", "law", "mu"}
+
+
+def _slugify(text: str) -> str:
+    """Lowercase, replace spaces/underscores with hyphens, strip non-alnum."""
+    s = text.lower().strip()
+    s = re.sub(r"[\s_]+", "-", s)
+    s = re.sub(r"[^a-z0-9\-]", "", s)
+    s = re.sub(r"-{2,}", "-", s)
+    return s.strip("-")
+
+
+def _strip_frontmatter(text: str) -> str:
+    """Remove YAML frontmatter (between opening and closing ---) from note text."""
+    if not text.startswith("---"):
+        return text
+    end = text.find("---", 3)
+    if end == -1:
+        return text
+    return text[end + 3:].lstrip("\n")
+
+
+def _spacy_tokenizer(text: str) -> list[str]:
+    """Lemmatize and filter tokens using the loaded spaCy model.
+
+    Used as the CountVectorizer tokenizer so BERTopic keyword extraction
+    operates on lemmas rather than raw surface forms (e.g. 'ritual' not
+    'rituals', 'mediat' not 'mediating').  Falls back to whitespace split
+    if spaCy has not loaded yet.
+    """
+    if _nlp is None:
+        return text.split()
+    doc = _nlp(text[:50_000])
+    return [
+        token.lemma_.lower()
+        for token in doc
+        if not token.is_stop
+        and not token.is_punct
+        and token.is_alpha
+        and len(token.lemma_) > 2
+    ]
+
+
+# ---------------------------------------------------------------------------
+# App & graph state
+# ---------------------------------------------------------------------------
+
+app = FastAPI(title="ZettleBank Intelligence Layer")
+graph = nx.DiGraph()
+
+# Pipeline models (loaded at startup)
+_nlp: spacy.language.Language | None = None
+_bertopic_model: BERTopic | None = None
+_bertopic_ready: bool = False
+# note stem → topic id, populated during fit
+_note_topics: dict[str, int] = {}
+
+# ---------------------------------------------------------------------------
+# Pydantic models – the Data Contract
+#
+# SCHEMA CONTRACT v1.0
+# Mirror: schema.ts – Zod schemas must stay in sync with these models.
+# When adding/removing/renaming a field here, update schema.ts to match.
+# ---------------------------------------------------------------------------
+
+
+class RelationType(str, Enum):
+    contradicts = "contradicts"
+    supports = "supports"
+    potential_to = "potential_to"
+    kinetic_to = "kinetic_to"
+    motivates = "motivates"
+    hinders = "hinders"
+    related = "related"
+
+
+class SmartRelation(BaseModel):
+    """A single edge in the narrative graph.
+
+    Field names match the frontmatter-template.md schema so the
+    frontend can write them directly into YAML (Shadow Database, ADR-003).
+      - link:       Obsidian wiki-link target  e.g. "[[the-mask-ceremony]]"
+      - type:       controlled vocabulary edge label
+      - confidence: float [0, 1] replacing the old "weight" key
+    """
+    link: str
+    type: RelationType = RelationType.related
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+
+
+class NarrativeMetadata(BaseModel):
+    """Strict 1:1 mirror of choracle-remote-00/templates/frontmatter-template.md.
+
+    Every field matches the template's YAML key exactly so the Obsidian
+    frontend can round-trip it via processFrontMatter without drift.
+    """
+    aliases: Optional[str] = Field(
+        default=None,
+        description="Alternate display name for the note.",
+    )
+    description: Optional[str] = Field(
+        default=None,
+        description="One-line summary of the note's content.",
+    )
+    tags: list[str] = Field(
+        default_factory=list,
+        description="Hierarchical tag list in Obsidian path syntax (e.g. 'topic/ritual_mask', 'affect/positive').",
+    )
+    smart_relations: list[SmartRelation] = Field(
+        default_factory=list,
+        description="Typed edges to other notes (link + type + confidence).",
+    )
+    source: Optional[str] = Field(
+        default=None,
+        description="Origin reference (URL, book title, archive ID).",
+    )
+    citationID: Optional[str] = Field(
+        default=None,
+        description="Zotero / BibTeX citation key.",
+    )
+
+
+class AnalyzeRequest(BaseModel):
+    note_id: str
+    content: str
+
+
+class CommunityTier(BaseModel):
+    """One resolution tier of the Leiden partition."""
+    resolution: float
+    label: str
+    community_id: int
+
+
+class AnalyzeResponse(BaseModel):
+    note_id: str
+    metadata: NarrativeMetadata
+    community_id: Optional[int] = None
+    community_tiers: list[CommunityTier] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Graph persistence – save / load the vault graph to disk
+# ---------------------------------------------------------------------------
+
+
+def _save_graph() -> None:
+    """Persist the NetworkX graph as node-link JSON."""
+    data = nx.node_link_data(graph)
+    GRAPH_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _load_graph() -> None:
+    """Restore the graph from disk on server startup."""
+    global graph
+    if GRAPH_PATH.exists():
+        raw = json.loads(GRAPH_PATH.read_text(encoding="utf-8"))
+        # NetworkX 3.4+ uses "edges" key; older persisted files use "links".
+        edges_key = "links" if "links" in raw else "edges"
+        graph = nx.node_link_graph(raw, directed=True, edges=edges_key)
+
+
+# ---------------------------------------------------------------------------
+# Graph helpers
+# ---------------------------------------------------------------------------
+
+
+def _upsert_node(note_id: str, metadata: dict) -> None:
+    """Add or update a node in the persistent graph."""
+    graph.add_node(note_id, **metadata)
+
+
+def _extract_wikilinks(content: str) -> list[str]:
+    """Parse [[wiki-links]] from note content to build edges."""
+    return re.findall(r"\[\[([^\]|]+?)(?:\|[^\]]+)?\]\]", content)
+
+
+def _upsert_edges(source: str, relations: list[SmartRelation]) -> None:
+    """Add or update directed edges with controlled relation types."""
+    for rel in relations:
+        graph.add_edge(
+            source,
+            rel.link,
+            relation_type=rel.type.value,
+            weight=rel.confidence,
+        )
+
+
+def _upsert_wikilink_edges(source: str, targets: list[str]) -> None:
+    """Create 'related' edges for every wiki-link found in content."""
+    for target in targets:
+        if target != source:
+            graph.add_edge(
+                source,
+                target,
+                relation_type="related",
+                weight=0.5,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Smart Connections integration – load embeddings, find top-K neighbors
+# ---------------------------------------------------------------------------
+
+# In-memory cache: note_id → 384-dim numpy vector
+_embeddings: dict[str, np.ndarray] = {}
+# note_id → list of outlink target strings
+_sc_outlinks: dict[str, list[str]] = {}
+
+
+def _note_id_from_path(path: str) -> str:
+    """Convert a Smart Connections path like 'notes/khmer-tiger-spirit.md' to 'khmer-tiger-spirit'."""
+    return Path(path).stem
+
+
+def _load_smart_env() -> None:
+    """Parse all .ajson files from Smart Connections multi/ dir.
+
+    Each .ajson file contains one or more newline-delimited JSON entries
+    keyed as "smart_sources:<path>". We extract the embedding vector
+    and outlinks for each note.
+    """
+    _embeddings.clear()
+    _sc_outlinks.clear()
+
+    if not SMART_ENV_DIR.exists():
+        return
+
+    for ajson_file in SMART_ENV_DIR.glob("*.ajson"):
+        try:
+            raw = ajson_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        for line in raw.strip().split("\n"):
+            line = line.strip().rstrip(",")
+            if not line:
+                continue
+
+            # Each line is: "smart_sources:path": { ... } or "smart_blocks:path#heading": { ... }
+            # We only want smart_sources entries (full-note embeddings)
+            if not line.startswith('"smart_sources:'):
+                continue
+
+            try:
+                # Parse as a single-key JSON object
+                obj = json.loads("{" + line + "}")
+            except json.JSONDecodeError:
+                continue
+
+            for key, val in obj.items():
+                if not key.startswith("smart_sources:"):
+                    continue
+
+                path = val.get("path", "")
+                if not path:
+                    continue
+
+                note_id = _note_id_from_path(path)
+
+                # Extract embedding vector
+                embeds = val.get("embeddings", {})
+                model_data = embeds.get(EMBED_MODEL_KEY, {})
+                vec = model_data.get("vec")
+                if vec and isinstance(vec, list):
+                    _embeddings[note_id] = np.array(vec, dtype=np.float32)
+
+                # Extract outlinks
+                outlinks = val.get("outlinks", [])
+                targets = [ol.get("target", "") for ol in outlinks if ol.get("target")]
+                if targets:
+                    _sc_outlinks[note_id] = targets
+
+
+def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    """Cosine similarity between two vectors."""
+    dot = np.dot(a, b)
+    norm_a = np.linalg.norm(a)
+    norm_b = np.linalg.norm(b)
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return float(dot / (norm_a * norm_b))
+
+
+def _find_top_k_neighbors(note_id: str, k: int = 5) -> list[tuple[str, float]]:
+    """Find the top-k most similar notes by cosine similarity of embeddings.
+
+    Returns list of (neighbor_note_id, similarity_score) sorted descending.
+    """
+    if note_id not in _embeddings:
+        return []
+
+    query_vec = _embeddings[note_id]
+    scores: list[tuple[str, float]] = []
+
+    for other_id, other_vec in _embeddings.items():
+        if other_id == note_id:
+            continue
+        sim = _cosine_similarity(query_vec, other_vec)
+        scores.append((other_id, sim))
+
+    scores.sort(key=lambda x: x[1], reverse=True)
+    return scores[:k]
+
+
+def _infer_relation_type(
+    source: str, target: str, similarity: float
+) -> RelationType:
+    """Infer a relation type from graph topology and similarity score.
+
+    Heuristics (ADR-002 discriminative approach):
+    - If bidirectional edge exists → supports
+    - If only one-way edge → potential_to
+    - If target has outlink to source via SC data → kinetic_to
+    - If high similarity (>0.8) → supports
+    - If moderate similarity (>0.5) → motivates
+    - Default → related
+    """
+    has_forward = graph.has_edge(source, target)
+    has_backward = graph.has_edge(target, source)
+
+    if has_forward and has_backward:
+        return RelationType.supports
+    if has_forward:
+        return RelationType.potential_to
+
+    # Check SC outlinks for reverse connection
+    target_outlinks = _sc_outlinks.get(target, [])
+    if source in target_outlinks or source.replace("-", " ") in target_outlinks:
+        return RelationType.kinetic_to
+
+    if similarity > 0.8:
+        return RelationType.supports
+    if similarity > 0.5:
+        return RelationType.motivates
+
+    return RelationType.related
+
+
+def _generate_smart_relations(
+    note_id: str, neighbors: list[tuple[str, float]], limit: int = 5
+) -> list[SmartRelation]:
+    """Generate smart_relations from top-K embedding neighbors + graph data."""
+    relations: list[SmartRelation] = []
+
+    for neighbor_id, sim_score in neighbors[:limit]:
+        rel_type = _infer_relation_type(note_id, neighbor_id, sim_score)
+        relations.append(SmartRelation(
+            link=neighbor_id,
+            type=rel_type,
+            confidence=round(min(sim_score, 1.0), 3),
+        ))
+
+    return relations
+
+
+
+# ---------------------------------------------------------------------------
+# Multi-resolution Leiden (ADR-001)
+#
+# Two tiers produce a hierarchical community structure:
+#   Macro (γ=0.5)  → coarse global themes  (Acts)
+#   Micro (γ=2.0)  → fine scene beats      (Scenes)
+#
+# Community labels are derived from the most-connected node in each
+# cluster, then combined into Obsidian path-syntax tags:
+#   Macro/Micro  →  "Theme/Ritual"  or  "Act/Identity"
+# ---------------------------------------------------------------------------
+
+
+def _nx_to_igraph() -> tuple[ig.Graph, dict[int, str]]:
+    """Convert the persistent NetworkX DiGraph to an igraph Graph."""
+    mapping = {node: idx for idx, node in enumerate(graph.nodes())}
+    reverse = {idx: node for node, idx in mapping.items()}
+
+    ig_graph = ig.Graph(directed=True)
+    ig_graph.add_vertices(len(mapping))
+    ig_graph.vs["name"] = list(mapping.keys())
+
+    edges = [(mapping[u], mapping[v]) for u, v in graph.edges()]
+    weights = [graph[u][v].get("weight", 1.0) for u, v in graph.edges()]
+
+    if edges:
+        ig_graph.add_edges(edges)
+        ig_graph.es["weight"] = weights
+
+    return ig_graph, reverse
+
+
+def _run_leiden(
+    ig_graph: ig.Graph,
+    reverse: dict[int, str],
+    resolution: float,
+) -> dict[str, int]:
+    """Run Leiden at a single resolution and return node → community_id."""
+    if ig_graph.vcount() < 2:
+        return {reverse[i]: 0 for i in range(ig_graph.vcount())}
+
+    has_edges = ig_graph.ecount() > 0
+
+    partition = find_partition(
+        ig_graph,
+        RBConfigurationVertexPartition,
+        weights="weight" if has_edges else None,
+        resolution_parameter=resolution,
+    )
+
+    return {reverse[idx]: mem for idx, mem in enumerate(partition.membership)}
+
+
+def _community_label(community_id: int, membership: dict[str, int]) -> str:
+    """Derive a human-readable label for a community.
+
+    Strategy: pick the node with the highest degree inside the community
+    and title-case its note_id (replacing hyphens with spaces).
+    """
+    members = [n for n, c in membership.items() if c == community_id]
+    if not members:
+        return f"Cluster-{community_id}"
+
+    # Highest-degree node as representative
+    best = max(members, key=lambda n: graph.degree(n) if n in graph else 0)
+    # Title-case the note_id slug
+    label = best.replace("-", " ").replace("_", " ").strip()
+    return label.title()
+
+
+def _detect_multi_resolution() -> tuple[
+    dict[str, int],   # macro membership
+    dict[str, int],   # micro membership
+    dict[int, str],   # macro labels
+    dict[int, str],   # micro labels
+]:
+    """Run Leiden at both macro and micro resolutions."""
+    if graph.number_of_nodes() < 2:
+        trivial = {n: 0 for n in graph.nodes()}
+        return trivial, trivial, {0: "Vault"}, {0: "Vault"}
+
+    ig_graph, reverse = _nx_to_igraph()
+
+    macro = _run_leiden(ig_graph, reverse, RESOLUTION_MACRO)
+    micro = _run_leiden(ig_graph, reverse, RESOLUTION_MICRO)
+
+    macro_labels = {
+        cid: _community_label(cid, macro)
+        for cid in set(macro.values())
+    }
+    micro_labels = {
+        cid: _community_label(cid, micro)
+        for cid in set(micro.values())
+    }
+
+    return macro, micro, macro_labels, micro_labels
+
+
+
+# Legacy single-resolution helper (used by /graph/communities)
+def _detect_communities(resolution: float = 1.0) -> dict[str, int]:
+    """Single-resolution Leiden for backward compatibility."""
+    if graph.number_of_nodes() < 2:
+        return {n: 0 for n in graph.nodes()}
+    ig_graph, reverse = _nx_to_igraph()
+    return _run_leiden(ig_graph, reverse, resolution)
+
+
+# ---------------------------------------------------------------------------
+# Relation + tag generation via Smart Connections embeddings
+# ---------------------------------------------------------------------------
+
+
+def _classify_relations(
+    note_id: str, content: str
+) -> tuple[list[SmartRelation], list[tuple[str, float]]]:
+    """Extract relations using Smart Connections top-5 embedding neighbors.
+
+    Returns (relations, neighbors) so the caller can reuse neighbors for tags.
+    Falls back to empty if note has no embedding.
+    """
+    neighbors = _find_top_k_neighbors(note_id, k=5)
+    if not neighbors:
+        return [], []
+
+    relations = _generate_smart_relations(note_id, neighbors, limit=5)
+    return relations, neighbors
+
+
+# ---------------------------------------------------------------------------
+# Multi-stage pipeline helpers (Stages B, C, D)
+# ---------------------------------------------------------------------------
+
+
+def _load_pipeline_models() -> None:
+    """Load spaCy and BERTopic models at startup."""
+    global _nlp
+    _nlp = spacy.load(SPACY_MODEL)
+    logger.info(f"spaCy {SPACY_MODEL} loaded")
+    _fit_bertopic_on_vault()
+
+
+def _fit_bertopic_on_vault() -> None:
+    """Fit BERTopic on all vault .md files. Safe for small/empty vaults.
+
+    Improvements applied:
+    - Frontmatter stripped before fitting so YAML schema words don't pollute
+      keyword extraction.
+    - Smart Connections embeddings (bge-micro-v2, 384-dim) passed directly as
+      pre-computed embeddings when available, keeping BERTopic's semantic space
+      consistent with the Smart Relations embeddings.
+    - TruncatedSVD replaces PCA for dimensionality reduction (better suited to
+      sparse/dense text embedding matrices; avoids numba/LLVM issues on Py3.13).
+    - spaCy lemmatization tokenizer in CountVectorizer so keyword extraction
+      collapses inflected forms (ritual/rituals → ritual).
+    - n_clusters ceiling raised to 15 for finer-grained topic coverage.
+    - Stores note_stem → topic_id mapping for per-note lookup at analyze-time.
+    """
+    global _bertopic_model, _bertopic_ready, _note_topics
+
+    docs: list[str] = []
+    stems: list[str] = []
+    if VAULT_NOTES_DIR.exists():
+        for md in sorted(VAULT_NOTES_DIR.glob("*.md")):
+            raw = md.read_text(encoding="utf-8", errors="replace").strip()
+            if raw:
+                docs.append(_strip_frontmatter(raw))
+                stems.append(md.stem)
+
+    if len(docs) < 2:
+        logger.warning("BERTopic: <2 docs in vault, model not fitted")
+        _bertopic_model = None
+        _bertopic_ready = False
+        _note_topics = {}
+        return
+
+    # Align Smart Connections embeddings with the doc list.
+    # Notes that have SC embeddings use them directly; the rest are dropped
+    # from the pre-computed matrix path and BERTopic falls back to its own
+    # sentence-transformer embedding for the full corpus.
+    embedding_matrix: np.ndarray | None = None
+    if _embeddings:
+        aligned_docs, aligned_stems, aligned_vecs = [], [], []
+        for doc, stem in zip(docs, stems):
+            if stem in _embeddings:
+                aligned_docs.append(doc)
+                aligned_stems.append(stem)
+                aligned_vecs.append(_embeddings[stem])
+        if len(aligned_docs) >= 2:
+            docs = aligned_docs
+            stems = aligned_stems
+            embedding_matrix = np.stack(aligned_vecs).astype(np.float32)
+            logger.info(
+                f"BERTopic: using {len(aligned_docs)} pre-computed SC embeddings"
+            )
+
+    n_clusters = max(2, min(15, len(docs) // 3))
+    n_components = min(5, len(docs) - 1)
+
+    # spaCy lemmatization tokenizer (uses the already-loaded _nlp model).
+    # stop_words=None because _spacy_tokenizer already filters stop words.
+    vectorizer = CountVectorizer(tokenizer=_spacy_tokenizer, stop_words=None)
+
+    _bertopic_model = BERTopic(
+        umap_model=TruncatedSVD(n_components=n_components),
+        hdbscan_model=KMeans(n_clusters=n_clusters, random_state=42),
+        vectorizer_model=vectorizer,
+        verbose=False,
+    )
+    topics, _ = _bertopic_model.fit_transform(docs, embeddings=embedding_matrix)
+
+    _note_topics = {stem: int(tid) for stem, tid in zip(stems, topics)}
+    _bertopic_ready = True
+    logger.info(
+        f"BERTopic fitted on {len(docs)} docs, "
+        f"{len(_bertopic_model.get_topic_info())} topics, "
+        f"{n_clusters} clusters"
+    )
+
+
+def _get_community_keywords(community_id: int, membership: dict[str, int], top_n: int = 8) -> list[str]:
+    """Return the top-N BERTopic keywords for a macro community.
+
+    Finds the plurality topic_id across all community members via Counter,
+    then returns keyword strings from that dominant topic.
+    Returns [] if BERTopic not ready, community is empty, or all members are outliers.
+    """
+    if _bertopic_model is None or not _bertopic_ready:
+        return []
+
+    members = [stem for stem, cid in membership.items() if cid == community_id]
+    if not members:
+        return []
+
+    topic_ids = [_note_topics[stem] for stem in members if stem in _note_topics]
+    # Filter out outlier topic (-1)
+    topic_ids = [tid for tid in topic_ids if tid != -1]
+    if not topic_ids:
+        return []
+
+    dominant_id, _ = Counter(topic_ids).most_common(1)[0]
+    topic_info = _bertopic_model.get_topic(dominant_id)
+    if not topic_info:
+        return []
+
+    return [word for word, _ in topic_info[:top_n]]
+
+
+async def _llm_topic_label(keywords: list[str], note_content: str) -> str:
+    """Call Ollama to produce a concise Title_Case label from community keywords.
+
+    Returns a 2–5 word label with underscores (e.g. "Logistics_of_the_Siege").
+    Falls back to slugified top-3 keywords on any error or empty result.
+    """
+    fallback = "_".join(_slugify(w) for w in keywords[:3] if _slugify(w)) or "unassigned"
+
+    keyword_str = ", ".join(keywords)
+    excerpt = note_content[:500].replace("\n", " ")
+    prompt = (
+        "Given these topic keywords and a note excerpt, produce a concise 2-5 word "
+        "label in Title_Case with underscores instead of spaces (e.g. Siege_Logistics, "
+        "Ritual_Mask_Ceremony, Character_Identity_Crisis). "
+        "Output ONLY the label, no punctuation, no explanation.\n\n"
+        f"Keywords: {keyword_str}\n"
+        f"Excerpt: {excerpt}\n\n"
+        "Label:"
+    )
+
+    try:
+        raw = await _ollama_complete(prompt, json_mode=False)
+        if not isinstance(raw, str):
+            return fallback
+        # Post-process: strip surrounding quotes/whitespace, normalise spaces to _
+        label = raw.strip().strip('"\'')
+        label = re.sub(r"\s+", "_", label)
+        # Keep only alnum, underscore, hyphen
+        label = re.sub(r"[^a-zA-Z0-9_\-]", "", label)
+        if not label:
+            return fallback
+        return label
+    except Exception as exc:
+        logger.warning(f"Stage B LLM label error: {exc}")
+        return fallback
+
+
+async def _run_stage_b_topic(
+    content: str,
+    note_id: str,
+    macro_id: int | None,
+    macro_membership: dict[str, int],
+) -> list[str]:
+    """Stage B: BERTopic → LLM → up to two topic/<HumanLabel> tags.
+
+    Priority order (note-specific first, community second):
+    1. If BERTopic not ready → ["topic/unassigned"]
+    2. Resolve this note's own BERTopic topic_id from the pre-fitted lookup;
+       if the note is new (not in vault at fit time) run transform() live.
+    3. Resolve the Leiden macro community's dominant topic_id; if it differs
+       from the note-level topic, generate a second label (up to 2 tags total).
+    4. Each topic_id → top-8 lemmatised keywords → Ollama Title_Case label.
+    """
+    if _bertopic_model is None or not _bertopic_ready:
+        return ["topic/unassigned"]
+
+    async def _label_for_topic_id(topic_id: int) -> str | None:
+        """Return a Title_Case label string for a BERTopic topic_id, or None."""
+        info = _bertopic_model.get_topic(topic_id)
+        if not info:
+            return None
+        kws = [w for w, _ in info[:8]]
+        return await _llm_topic_label(kws, content)
+
+    tags: list[str] = []
+
+    # --- Priority 1: note-level topic (specific to this document) ---
+    note_topic_id = _note_topics.get(note_id)
+    if note_topic_id is None:
+        # New note not in vault at fit time — run transform() live
+        try:
+            raw_topics, _ = await asyncio.to_thread(
+                _bertopic_model.transform, [_strip_frontmatter(content)]
+            )
+            note_topic_id = int(raw_topics[0])
+        except Exception as exc:
+            logger.warning(f"Stage B transform() error: {exc}")
+            note_topic_id = None
+
+    if note_topic_id is not None and note_topic_id != -1:
+        label = await _label_for_topic_id(note_topic_id)
+        if label:
+            tags.append(f"topic/{label}")
+
+    # --- Priority 2: community-level topic (if distinct from note topic) ---
+    if macro_id is not None and len(tags) < 2:
+        members = [
+            s for s, cid in macro_membership.items() if cid == macro_id
+        ]
+        topic_ids = [
+            _note_topics[s]
+            for s in members
+            if s in _note_topics and _note_topics[s] != -1
+        ]
+        if topic_ids:
+            community_topic_id, _ = Counter(topic_ids).most_common(1)[0]
+            if community_topic_id != note_topic_id:
+                label2 = await _label_for_topic_id(community_topic_id)
+                if label2:
+                    candidate = f"topic/{label2}"
+                    if candidate not in tags:
+                        tags.append(candidate)
+
+    return tags if tags else ["topic/unassigned"]
+
+
+def _run_stage_c_aspects(content: str) -> list[str]:
+    """Stage C: spaCy NER → aspect/category/entity tags.
+
+    For each detected entity, records its slugified text under the
+    appropriate aspect category.  Uses a Counter per category so that
+    entities mentioned more than once rank higher; the top-3 by frequency
+    are kept per category to cap tag explosion.  Slug deduplication means
+    surface variants ("Mexico"/"Mexican" under different labels) don't
+    produce duplicate slugs within the same category.
+    """
+    if _nlp is None:
+        return []
+
+    doc = _nlp(content[:100000])
+    found: dict[str, Counter] = {}
+    for ent in doc.ents:
+        aspect = SPACY_TO_ASPECT.get(ent.label_)
+        if aspect:
+            slug = _slugify(ent.text)
+            if slug:
+                found.setdefault(aspect, Counter())[slug] += 1
+
+    tags: list[str] = []
+    for category in sorted(found):
+        for slug, _ in found[category].most_common(3):
+            tags.append(f"aspect/{category}/{slug}")
+    return tags
+
+
+async def _ollama_complete(prompt: str, model: str = OLLAMA_MODEL,
+                           json_mode: bool = True) -> dict | str:
+    """Async Ollama HTTP call via httpx."""
+    url = f"{OLLAMA_BASE_URL}/api/generate"
+    payload: dict = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+    }
+    if json_mode:
+        payload["format"] = "json"
+
+    async with httpx_client.AsyncClient(timeout=60.0) as client:
+        resp = await client.post(url, json=payload)
+        resp.raise_for_status()
+        body = resp.json()
+        raw = body.get("response", "")
+
+    if json_mode:
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return {"affect": "mu", "code": "mu"}
+    return raw
+
+
+async def _run_stage_d_llm_classify(content: str) -> tuple[list[str], list[str]]:
+    """Stage D: single Ollama call → affect/ + code/ tags.
+
+    Returns (affect_tags, code_tags).
+    Falls back to mu/mu on any error.
+    """
+    prompt = (
+        "Classify the following text. Respond with a JSON object with two keys:\n"
+        '- "affect": one of "positive", "negative", or "mu"\n'
+        '- "code": one of "qi", "law", or "mu"\n\n'
+        "Definitions:\n"
+        '- affect: overall emotional valence. "mu" if ambiguous or neutral.\n'
+        '- code: "qi" if the text concerns energy/vitality/flow, '
+        '"law" if it concerns rules/structure/order, "mu" if neither.\n\n'
+        f"Text:\n{content[:3000]}\n\nJSON:"
+    )
+
+    try:
+        result = await _ollama_complete(prompt)
+        if isinstance(result, dict):
+            affect = result.get("affect", "mu")
+            code = result.get("code", "mu")
+        else:
+            affect, code = "mu", "mu"
+    except Exception as exc:
+        logger.warning(f"Stage D Ollama error: {exc}")
+        affect, code = "mu", "mu"
+
+    # Coerce to string (LLM may return lists or other types)
+    if not isinstance(affect, str):
+        affect = "mu"
+    if not isinstance(code, str):
+        code = "mu"
+
+    # Validate against allowed values
+    if affect not in AFFECT_VALUES:
+        affect = "mu"
+    if code not in CODE_VALUES:
+        code = "mu"
+
+    return [f"affect/{affect}"], [f"code/{code}"]
+
+
+def _assemble_tags(
+    topic_tags: list[str],
+    aspect_tags: list[str],
+    affect_tags: list[str],
+    code_tags: list[str],
+    limit: int = 10,
+) -> list[str]:
+    """Merge all pipeline tags, dedup, cap at limit."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for tag in topic_tags + aspect_tags + affect_tags + code_tags:
+        if tag not in seen:
+            seen.add(tag)
+            result.append(tag)
+        if len(result) >= limit:
+            break
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle
+# ---------------------------------------------------------------------------
+
+
+@app.on_event("startup")
+async def on_startup():
+    _load_graph()
+    _load_smart_env()
+    _load_pipeline_models()
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    _save_graph()
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok",
+        "nodes": graph.number_of_nodes(),
+        "edges": graph.number_of_edges(),
+        "graph_persisted": GRAPH_PATH.exists(),
+        "smart_connections": {
+            "embeddings_loaded": len(_embeddings),
+            "outlinks_loaded": len(_sc_outlinks),
+        },
+        "bertopic_ready": _bertopic_ready,
+    }
+
+
+@app.post("/smart-env/reload")
+async def reload_smart_env():
+    """Reload Smart Connections embeddings from disk."""
+    _load_smart_env()
+    return {
+        "embeddings_loaded": len(_embeddings),
+        "outlinks_loaded": len(_sc_outlinks),
+    }
+
+
+@app.post("/bertopic/refit")
+async def refit_bertopic():
+    """Refit the BERTopic model on the current vault notes without restarting."""
+    await asyncio.to_thread(_fit_bertopic_on_vault)
+    return {
+        "bertopic_ready": _bertopic_ready,
+        "note_topics": len(_note_topics),
+    }
+
+
+@app.post("/analyze", response_model=AnalyzeResponse)
+async def analyze(req: AnalyzeRequest):
+    """Multi-stage extraction pipeline.
+
+    Stage A (sequential — B depends on its Leiden output):
+      Smart Relations + wiki-links + dual-resolution Leiden
+
+    Stages B, C, D (parallel after A):
+      B: BERTopic community keywords → Ollama LLM → topic/<Label> tag
+      C: spaCy NER → aspect/ tags
+      D: Ollama → affect/ + code/ tags
+
+    Final: _assemble_tags() → up to 10 tags
+    """
+    if not req.content.strip():
+        raise HTTPException(status_code=422, detail="Content must not be empty.")
+
+    # --- Stage A: sequential (B depends on macro community output) ---
+    relations, neighbors = _classify_relations(req.note_id, req.content)
+    wikilinks = _extract_wikilinks(req.content)
+    _upsert_node(req.note_id, {})
+    _upsert_edges(req.note_id, relations)
+    _upsert_wikilink_edges(req.note_id, wikilinks)
+    _save_graph()
+    macro, micro, macro_labels, micro_labels = _detect_multi_resolution()
+
+    macro_id = macro.get(req.note_id)
+    micro_id = micro.get(req.note_id)
+
+    # --- Stages B, C, D: parallel ---
+    topic_tags, aspect_tags, (affect_tags, code_tags) = await asyncio.gather(
+        _run_stage_b_topic(req.content, req.note_id, macro_id, macro),
+        asyncio.to_thread(_run_stage_c_aspects, req.content),
+        _run_stage_d_llm_classify(req.content),
+    )
+
+    # Assemble final tag list
+    tags = _assemble_tags(topic_tags, aspect_tags, affect_tags, code_tags, limit=10)
+
+    # Build community tier info
+    tiers: list[CommunityTier] = []
+    if macro_id is not None:
+        tiers.append(CommunityTier(
+            resolution=RESOLUTION_MACRO,
+            label=macro_labels.get(macro_id, "Unknown"),
+            community_id=macro_id,
+        ))
+    if micro_id is not None:
+        tiers.append(CommunityTier(
+            resolution=RESOLUTION_MICRO,
+            label=micro_labels.get(micro_id, "Unknown"),
+            community_id=micro_id,
+        ))
+
+    narrative = NarrativeMetadata(
+        smart_relations=relations,
+        tags=tags,
+    )
+
+    return AnalyzeResponse(
+        note_id=req.note_id,
+        metadata=narrative,
+        community_id=macro_id if macro_id is not None else 0,
+        community_tiers=tiers,
+    )
+
+
+@app.get("/graph/communities")
+async def get_communities(resolution: float = 1.0):
+    """Return community assignments at a single resolution.
+
+    The resolution parameter γ tunes granularity:
+      - γ > 1 → more, smaller communities (micro-clusters / Scenes)
+      - γ < 1 → fewer, larger communities (macro-themes / Acts)
+    """
+    communities = _detect_communities(resolution)
+    return {"resolution": resolution, "communities": communities}
+
+
+@app.get("/graph/communities/multi")
+async def get_multi_communities():
+    """Return community assignments at both macro (γ=0.5) and micro (γ=2.0)."""
+    macro, micro, macro_labels, micro_labels = _detect_multi_resolution()
+    return {
+        "macro": {
+            "resolution": RESOLUTION_MACRO,
+            "communities": macro,
+            "labels": macro_labels,
+        },
+        "micro": {
+            "resolution": RESOLUTION_MICRO,
+            "communities": micro,
+            "labels": micro_labels,
+        },
+    }
+
+
+@app.get("/graph/node/{note_id}")
+async def get_node(note_id: str):
+    if note_id not in graph:
+        raise HTTPException(status_code=404, detail="Node not found.")
+    neighbors = {
+        target: graph[note_id][target]
+        for target in graph.successors(note_id)
+    }
+    return {
+        "note_id": note_id,
+        "metadata": dict(graph.nodes[note_id]),
+        "outgoing_relations": neighbors,
+    }
+
+
+@app.post("/graph/ingest")
+async def ingest_vault(notes: list[dict]):
+    """Bulk-ingest notes to build the vault graph before analysis.
+
+    Each dict must have: { "note_id": str, "content": str }
+    This populates the graph with wiki-link edges so that Leiden
+    partitions are meaningful from the first /analyze call.
+    """
+    for note in notes:
+        nid = note.get("note_id", "")
+        content = note.get("content", "")
+        if not nid:
+            continue
+        _upsert_node(nid, {})
+        links = _extract_wikilinks(content)
+        _upsert_wikilink_edges(nid, links)
+
+    _save_graph()
+
+    # Re-fit BERTopic after bulk ingest so topics reflect new corpus
+    _fit_bertopic_on_vault()
+
+    return {
+        "ingested": len(notes),
+        "nodes": graph.number_of_nodes(),
+        "edges": graph.number_of_edges(),
+        "bertopic_ready": _bertopic_ready,
+    }
