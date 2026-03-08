@@ -84,11 +84,12 @@ VAULT_NOTES_DIR = Path(__file__).parent / _VAULT_DIR / "notes"
 BERTOPIC_PATH = Path(__file__).parent / "bertopic_model"
 
 # Ollama settings
-OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL    = os.environ.get("OLLAMA_MODEL",    "llama3.2")
+OLLAMA_BASE_URL         = os.environ.get("OLLAMA_BASE_URL",         "http://localhost:11434")
+OLLAMA_MODEL            = os.environ.get("OLLAMA_MODEL",            "llama3.2")
+NARRATIVE_AUDITOR_MODEL = os.environ.get("NARRATIVE_AUDITOR_MODEL", "llama3.1")
 
 # spaCy model
-SPACY_MODEL = os.environ.get("SPACY_MODEL", "en_core_web_sm")
+SPACY_MODEL = os.environ.get("SPACY_MODEL", "en_core_web_trf")
 
 # spaCy entity type → aspect category mapping
 SPACY_TO_ASPECT: dict[str, str] = {
@@ -109,6 +110,18 @@ SPACY_TO_ASPECT: dict[str, str] = {
 ASPECT_TYPES = {"place", "time", "character", "object"}
 AFFECT_VALUES = {"positive", "negative", "mu"}
 CODE_VALUES = {"qi", "law", "mu"}
+
+# Structural bridge threshold: Burt constraint below this → Ten-pivot candidate
+BURT_BRIDGE_THRESHOLD = float(os.environ.get("BURT_BRIDGE_THRESHOLD", "0.4"))
+
+# 16-beat Kishōtenketsu codes (CLAUDE.md Rule 2) — used by the Narrative Auditor
+BEAT_CODES = {
+    "ki-1",     "ki-2",     "ki-3",     "ki-4",
+    "sho-5",    "sho-6",    "sho-7",    "sho-8",
+    "ten-9",    "ten-10",   "ten-11",   "ten-12",
+    "ketsu-13", "ketsu-14", "ketsu-15", "ketsu-16",
+    "unplaced",
+}
 
 
 def _slugify(text: str) -> str:
@@ -242,11 +255,33 @@ class CommunityTier(BaseModel):
     community_id: int
 
 
+class NarrativeAudit(BaseModel):
+    """Narrative bridge analysis produced by the Narrative Auditor agent.
+
+    Only populated when bridge_detected=True (Burt constraint < BURT_BRIDGE_THRESHOLD).
+    Mirrors schema.ts NarrativeAuditSchema — update both together.
+    """
+    beat_position: str = Field(
+        default="unplaced",
+        description="16-beat Kishōtenketsu position (ki-1..ketsu-16 or unplaced).",
+    )
+    bridge_note_ids: list[str] = Field(
+        default_factory=list,
+        description="Neighbouring notes this note bridges structurally.",
+    )
+    narrative_summary: str = Field(
+        default="",
+        description="LLM summary of the note's narrative bridge function.",
+    )
+
+
 class AnalyzeResponse(BaseModel):
     note_id: str
     metadata: NarrativeMetadata
     community_id: Optional[int] = None
     community_tiers: list[CommunityTier] = Field(default_factory=list)
+    bridge_detected: bool = False
+    narrative_audit: Optional[NarrativeAudit] = None
 
 
 # ---------------------------------------------------------------------------
@@ -564,6 +599,47 @@ def _detect_multi_resolution() -> tuple[
 
 
 
+# ---------------------------------------------------------------------------
+# Structural bridge detection — Burt's constraint
+# ---------------------------------------------------------------------------
+
+
+def _compute_bridge_score(note_id: str) -> float:
+    """Burt's constraint for *note_id* on the undirected graph projection.
+
+    Returns 1.0 (maximum constraint, no structural hole) when:
+    - the node has fewer than 2 neighbours (constraint undefined),
+    - the graph has < 3 nodes, or
+    - nx.constraint() raises an error.
+
+    Values below BURT_BRIDGE_THRESHOLD indicate structural holes:
+    the note bridges otherwise disconnected communities (Ten-pivot candidate).
+    """
+    if note_id not in graph or graph.number_of_nodes() < 3:
+        return 1.0
+    ug = graph.to_undirected()
+    if ug.degree(note_id) < 2:
+        return 1.0
+    try:
+        constraints = nx.constraint(ug, nodes=[note_id])
+        return float(constraints.get(note_id, 1.0))
+    except Exception:
+        return 1.0
+
+
+def _get_bridge_neighbors(note_id: str, macro: dict[str, int]) -> list[str]:
+    """Return immediate neighbours of *note_id* that belong to different macro communities.
+
+    Used to populate NarrativeAudit.bridge_note_ids so the Narrative Auditor
+    knows which communities the note bridges.
+    """
+    if note_id not in graph:
+        return []
+    note_community = macro.get(note_id, -1)
+    all_neighbors = set(graph.successors(note_id)) | set(graph.predecessors(note_id))
+    return [n for n in all_neighbors if macro.get(n, -2) != note_community]
+
+
 # Legacy single-resolution helper (used by /graph/communities)
 def _detect_communities(resolution: float = 1.0) -> dict[str, int]:
     """Single-resolution Leiden for backward compatibility."""
@@ -874,47 +950,94 @@ async def _ollama_complete(prompt: str, model: str = OLLAMA_MODEL,
     return raw
 
 
-async def _run_stage_d_llm_classify(content: str) -> tuple[list[str], list[str]]:
-    """Stage D: single Ollama call → affect/ + code/ tags.
+def _default_beat_from_community(
+    note_id: str, macro_id: int | None, macro_labels: dict[int, str]
+) -> str:
+    """Infer a default Kishōtenketsu beat from macro community label.
 
-    Returns (affect_tags, code_tags).
-    Falls back to mu/mu on any error.
+    Used when the Narrative Auditor is NOT triggered (bridge_detected=False).
+    Maps community label keywords to the opening beat of each act.
     """
+    if macro_id is None:
+        return "ki-1"
+    label = macro_labels.get(macro_id, "").lower()
+    if any(w in label for w in ("ten", "twist", "pivot", "turn", "revers")):
+        return "ten-9"
+    if any(w in label for w in ("sho", "develop", "continu", "elabor", "deepen")):
+        return "sho-5"
+    if any(w in label for w in ("ketsu", "resol", "synthes", "conclus", "integr")):
+        return "ketsu-13"
+    return "ki-1"
+
+
+async def _run_narrative_auditor(
+    note_id: str,
+    content: str,
+    bridge_nodes: list[str],
+) -> tuple[list[str], NarrativeAudit]:
+    """Agent 3 — Narrative Auditor (Llama 3.1), conditional on bridge detection.
+
+    Classifies the note's 16-beat Kishōtenketsu position and summarises its
+    structural bridge function.  Returns (combined_tags, NarrativeAudit).
+    Only called when Burt constraint < BURT_BRIDGE_THRESHOLD.
+    """
+    fallback_beat = "ten-9"  # Bridge notes typically occupy the Ten (pivot) act
+    bridge_str = ", ".join(bridge_nodes[:6]) if bridge_nodes else "none identified"
+    beat_list = (
+        "ki-1 ki-2 ki-3 ki-4 (Introduction/Ki), "
+        "sho-5 sho-6 sho-7 sho-8 (Development/Sho), "
+        "ten-9 ten-10 ten-11 ten-12 (Twist-Pivot/Ten), "
+        "ketsu-13 ketsu-14 ketsu-15 ketsu-16 (Resolution/Ketsu), "
+        "unplaced"
+    )
     prompt = (
-        "Classify the following text. Respond with a JSON object with two keys:\n"
-        '- "affect": one of "positive", "negative", or "mu"\n'
-        '- "code": one of "qi", "law", or "mu"\n\n'
-        "Definitions:\n"
-        '- affect: overall emotional valence. "mu" if ambiguous or neutral.\n'
-        '- code: "qi" if the text concerns energy/vitality/flow, '
-        '"law" if it concerns rules/structure/order, "mu" if neither.\n\n'
-        f"Text:\n{content[:3000]}\n\nJSON:"
+        "You are a narrative analyst specialising in Kishōtenketsu (起承転結 — "
+        "Introduction, Development, Twist, Resolution).\n"
+        "This knowledge-graph note has been flagged as a structural bridge "
+        "(low Burt constraint: it connects otherwise separate clusters).\n\n"
+        f"Bridged communities contain these notes: {bridge_str}\n\n"
+        "Classify this note using the 16-beat matrix and explain its bridge role.\n"
+        "Respond with valid JSON only — no prose before or after:\n"
+        "{\n"
+        '  "beat_position": "<one beat slug from: ' + beat_list + '>",\n'
+        '  "affect": "<positive|negative|mu>",\n'
+        '  "narrative_summary": "<2-3 sentences on this note\'s bridge function>"\n'
+        "}\n\n"
+        f"Text:\n{content[:2000]}\n\nJSON:"
+    )
+
+    fallback_audit = NarrativeAudit(
+        beat_position=fallback_beat,
+        bridge_note_ids=bridge_nodes,
+        narrative_summary="Structural bridge detected; narrative function unresolved.",
     )
 
     try:
-        result = await _ollama_complete(prompt)
-        if isinstance(result, dict):
-            affect = result.get("affect", "mu")
-            code = result.get("code", "mu")
-        else:
-            affect, code = "mu", "mu"
+        result = await _ollama_complete(
+            prompt, model=NARRATIVE_AUDITOR_MODEL, json_mode=True
+        )
+        if not isinstance(result, dict):
+            return [f"code/{fallback_beat}"], fallback_audit
+
+        beat = str(result.get("beat_position", fallback_beat)).strip()
+        if beat not in BEAT_CODES:
+            beat = fallback_beat
+
+        affect = str(result.get("affect", "mu")).strip()
+        if affect not in AFFECT_VALUES:
+            affect = "mu"
+
+        summary = str(result.get("narrative_summary", "")).strip()
+        audit = NarrativeAudit(
+            beat_position=beat,
+            bridge_note_ids=bridge_nodes,
+            narrative_summary=summary,
+        )
+        return [f"affect/{affect}", f"code/{beat}"], audit
+
     except Exception as exc:
-        logger.warning(f"Stage D Ollama error: {exc}")
-        affect, code = "mu", "mu"
-
-    # Coerce to string (LLM may return lists or other types)
-    if not isinstance(affect, str):
-        affect = "mu"
-    if not isinstance(code, str):
-        code = "mu"
-
-    # Validate against allowed values
-    if affect not in AFFECT_VALUES:
-        affect = "mu"
-    if code not in CODE_VALUES:
-        code = "mu"
-
-    return [f"affect/{affect}"], [f"code/{code}"]
+        logger.warning("Narrative Auditor error: %s", exc)
+        return [f"code/{fallback_beat}"], fallback_audit
 
 
 def _assemble_tags(
@@ -995,23 +1118,28 @@ async def refit_bertopic():
 
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze(req: AnalyzeRequest):
-    """Multi-stage extraction pipeline.
+    """Asynchronous Tri-Agent pipeline.
 
-    Stage A (sequential — B depends on its Leiden output):
-      Smart Relations + wiki-links + dual-resolution Leiden
+    Agent 1 — Structural Agent (NetworkX + Leiden + Burt constraint):
+      Sequential. Builds/updates graph, runs dual-resolution Leiden, computes
+      Burt constraint to detect low-modularity bridges (Ten-pivot candidates).
 
-    Stages B, C, D (parallel after A):
-      B: BERTopic community keywords → Ollama LLM → topic/<Label> tag
-      C: spaCy NER → aspect/ tags
-      D: Ollama → affect/ + code/ tags
+    Agent 2 — Semantic Agent (spaCy en_core_web_trf, low VRAM):
+      Sequential after Agent 1 to prevent VRAM contention with Agent 3.
+      Stage B (BERTopic CPU-only) runs concurrently with Agent 2.
 
-    Final: _assemble_tags() → up to 10 tags
+    Agent 3 — Narrative Auditor (Llama 3.1, conditional):
+      Triggered only when bridge_score < BURT_BRIDGE_THRESHOLD.
+      Produces full 16-beat Kishōtenketsu classification + NarrativeAudit.
+      When not triggered, a default beat is inferred from the community label.
+
+    Final: _assemble_tags() → up to 10 tags.
     """
     if not req.content.strip():
         raise HTTPException(status_code=422, detail="Content must not be empty.")
 
-    # --- Stage A: sequential (B depends on macro community output) ---
-    relations, neighbors = _classify_relations(req.note_id, req.content)
+    # --- Agent 1: Structural Agent ---
+    relations, _neighbors = _classify_relations(req.note_id, req.content)
     wikilinks = _extract_wikilinks(req.content)
     _upsert_node(req.note_id, {})
     _upsert_edges(req.note_id, relations)
@@ -1020,17 +1148,38 @@ async def analyze(req: AnalyzeRequest):
     macro, micro, macro_labels, micro_labels = _detect_multi_resolution()
 
     macro_id = macro.get(req.note_id)
-    micro_id = micro.get(req.note_id)
+    micro_id  = micro.get(req.note_id)
 
-    # --- Stages B, C, D: parallel ---
-    topic_tags, aspect_tags, (affect_tags, code_tags) = await asyncio.gather(
-        _run_stage_b_topic(req.content, req.note_id, macro_id, macro),
-        asyncio.to_thread(_run_stage_c_aspects, req.content),
-        _run_stage_d_llm_classify(req.content),
+    # Bridge detection: low Burt constraint = structural hole = Ten-pivot candidate
+    bridge_score    = _compute_bridge_score(req.note_id)
+    bridge_detected = bridge_score < BURT_BRIDGE_THRESHOLD
+    bridge_nodes    = _get_bridge_neighbors(req.note_id, macro) if bridge_detected else []
+
+    logger.info(
+        "Structural Agent: note=%s  constraint=%.3f  bridge=%s  bridge_nodes=%d",
+        req.note_id, bridge_score, bridge_detected, len(bridge_nodes),
     )
 
+    # --- Agent 2: Semantic Agent (spaCy trf, sequential) ---
+    # Stage B (BERTopic, CPU-only) runs concurrently — no VRAM overlap.
+    topic_tags, aspect_tags = await asyncio.gather(
+        _run_stage_b_topic(req.content, req.note_id, macro_id, macro),
+        asyncio.to_thread(_run_stage_c_aspects, req.content),
+    )
+
+    # --- Agent 3: Narrative Auditor — conditional on bridge detection ---
+    if bridge_detected:
+        logger.info("Narrative Auditor triggered for %s", req.note_id)
+        llm_tags, narrative_audit = await _run_narrative_auditor(
+            req.note_id, req.content, bridge_nodes
+        )
+    else:
+        default_beat    = _default_beat_from_community(req.note_id, macro_id, macro_labels)
+        llm_tags        = [f"code/{default_beat}"]
+        narrative_audit = None
+
     # Assemble final tag list
-    tags = _assemble_tags(topic_tags, aspect_tags, affect_tags, code_tags, limit=10)
+    tags = _assemble_tags(topic_tags, aspect_tags, llm_tags, [], limit=10)
 
     # Build community tier info
     tiers: list[CommunityTier] = []
@@ -1057,6 +1206,8 @@ async def analyze(req: AnalyzeRequest):
         metadata=narrative,
         community_id=macro_id if macro_id is not None else 0,
         community_tiers=tiers,
+        bridge_detected=bridge_detected,
+        narrative_audit=narrative_audit,
     )
 
 

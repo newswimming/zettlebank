@@ -1,0 +1,365 @@
+/* ZettleBank sidebar styles — uses Obsidian CSS variables for theme compat */
+
+.zettlebank-container {
+	padding: 12px;
+	font-size: var(--font-ui-small);
+}
+
+.zettlebank-header {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	margin-bottom: 16px;
+}
+
+.zettlebank-header h3 {
+	margin: 0;
+	font-size: var(--font-ui-medium);
+}
+
+.zettlebank-analyze-btn {
+	cursor: pointer;
+	padding: 4px 12px;
+	border-radius: var(--radius-s);
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+	border: none;
+	font-size: var(--font-ui-smaller);
+	font-weight: 500;
+}
+
+.zettlebank-analyze-btn:hover {
+	background: var(--interactive-accent-hover);
+}
+
+/* Loading / empty / error states */
+
+.zettlebank-loading {
+	color: var(--text-muted);
+	padding: 24px 0;
+	text-align: center;
+}
+
+.zettlebank-empty-state {
+	color: var(--text-muted);
+	padding: 16px 0;
+}
+
+.zettlebank-empty-state p {
+	margin: 0;
+}
+
+.zettlebank-error {
+	color: var(--text-error);
+	padding: 16px 0;
+}
+
+.zettlebank-error p {
+	margin: 0 0 8px 0;
+}
+
+.zettlebank-empty {
+	color: var(--text-faint);
+	font-style: italic;
+	font-size: var(--font-ui-smaller);
+}
+
+/* ========================================================================
+   Staging area — approval card UI
+   ======================================================================== */
+
+.zettlebank-staging {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+/* Generic card wrapper */
+
+.zettlebank-card {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	padding: 10px 12px;
+	background: var(--background-primary);
+}
+
+.zettlebank-card-label {
+	margin: 0 0 8px 0;
+	font-size: var(--font-ui-small);
+	color: var(--text-muted);
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+}
+
+/* Tag toggle chips */
+
+.zettlebank-tags {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+}
+
+.zettlebank-tag-toggle {
+	display: inline-block;
+	padding: 2px 10px;
+	border-radius: var(--radius-s);
+	border: 1px solid transparent;
+	font-size: var(--font-ui-smaller);
+	cursor: pointer;
+	transition: opacity 0.15s, background 0.15s, border-color 0.15s;
+}
+
+.zettlebank-tag-toggle.is-accepted {
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+	border-color: var(--interactive-accent);
+}
+
+.zettlebank-tag-toggle.is-rejected {
+	background: var(--background-modifier-hover);
+	color: var(--text-faint);
+	border-color: var(--background-modifier-border);
+	opacity: 0.6;
+	text-decoration: line-through;
+}
+
+.zettlebank-tag-toggle:hover {
+	opacity: 1;
+}
+
+/* Description textarea */
+
+.zettlebank-description-input {
+	width: 100%;
+	box-sizing: border-box;
+	padding: 6px 8px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	background: var(--background-primary);
+	color: var(--text-normal);
+	font-family: var(--font-interface);
+	font-size: var(--font-ui-smaller);
+	resize: vertical;
+}
+
+.zettlebank-description-input:focus {
+	outline: none;
+	border-color: var(--interactive-accent);
+}
+
+/* ========================================================================
+   Beat Matrix — 4×4 Kishōtenketsu grid
+   ======================================================================== */
+
+.zettlebank-beatmatrix-grid {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.zettlebank-beatmatrix-row {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.zettlebank-beatmatrix-act {
+	width: 32px;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	text-align: right;
+	flex-shrink: 0;
+}
+
+.zettlebank-beat-cell {
+	flex: 1;
+	padding: 4px 0;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	background: var(--background-secondary);
+	color: var(--text-normal);
+	font-size: var(--font-ui-smaller);
+	cursor: pointer;
+	text-align: center;
+	transition: background 0.12s, border-color 0.12s;
+}
+
+.zettlebank-beat-cell:hover {
+	background: var(--background-modifier-hover);
+	border-color: var(--text-faint);
+}
+
+.zettlebank-beat-cell.is-selected {
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+	border-color: var(--interactive-accent);
+	font-weight: 600;
+}
+
+.zettlebank-bridge-badge {
+	margin-left: 6px;
+	font-size: 10px;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: var(--text-accent);
+	font-weight: 600;
+}
+
+.zettlebank-bridge-summary {
+	margin: 0 0 8px 0;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	font-style: italic;
+	line-height: 1.4;
+}
+
+.zettlebank-beat-selected {
+	margin: 6px 0 0 0;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-faint);
+}
+
+.zettlebank-beat-selected code {
+	background: var(--background-modifier-hover);
+	border-radius: var(--radius-s);
+	padding: 1px 4px;
+	font-size: var(--font-ui-smaller);
+}
+
+/* ========================================================================
+   Relation cards — with editable target link
+   ======================================================================== */
+
+.zettlebank-relation-card {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	padding: 6px 8px;
+	margin-top: 4px;
+	border-radius: var(--radius-s);
+	font-size: var(--font-ui-smaller);
+	transition: opacity 0.15s, background 0.15s;
+}
+
+.zettlebank-relation-card.is-accepted {
+	background: var(--background-secondary);
+}
+
+.zettlebank-relation-card.is-rejected {
+	background: var(--background-modifier-hover);
+	opacity: 0.5;
+}
+
+.zettlebank-relation-card:hover {
+	opacity: 1;
+}
+
+.zettlebank-relation-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	cursor: pointer;
+}
+
+.zettlebank-relation-type {
+	font-weight: 600;
+	min-width: 80px;
+}
+
+.zettlebank-relation-confidence {
+	color: var(--text-faint);
+	font-variant-numeric: tabular-nums;
+}
+
+.zettlebank-relation-status {
+	font-size: 10px;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	color: var(--text-faint);
+	margin-left: auto;
+}
+
+.zettlebank-relation-link-input {
+	width: 100%;
+	box-sizing: border-box;
+	padding: 3px 6px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	background: var(--background-primary);
+	color: var(--text-accent);
+	font-family: var(--font-interface);
+	font-size: var(--font-ui-smaller);
+}
+
+.zettlebank-relation-link-input:focus {
+	outline: none;
+	border-color: var(--interactive-accent);
+}
+
+/* Community badge */
+
+.zettlebank-community {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.zettlebank-community-label {
+	font-size: var(--font-ui-small);
+	color: var(--text-muted);
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+}
+
+.zettlebank-community-id {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 24px;
+	height: 24px;
+	padding: 0 6px;
+	border-radius: var(--radius-s);
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+	font-size: var(--font-ui-smaller);
+	font-weight: 600;
+}
+
+/* Action bar */
+
+.zettlebank-actions {
+	display: flex;
+	gap: 8px;
+	padding-top: 4px;
+}
+
+.zettlebank-btn-approve {
+	flex: 1;
+	cursor: pointer;
+	padding: 6px 12px;
+	border-radius: var(--radius-s);
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+	border: none;
+	font-size: var(--font-ui-smaller);
+	font-weight: 600;
+}
+
+.zettlebank-btn-approve:hover {
+	background: var(--interactive-accent-hover);
+}
+
+.zettlebank-btn-secondary {
+	cursor: pointer;
+	padding: 6px 12px;
+	border-radius: var(--radius-s);
+	background: var(--background-modifier-hover);
+	color: var(--text-muted);
+	border: 1px solid var(--background-modifier-border);
+	font-size: var(--font-ui-smaller);
+}
+
+.zettlebank-btn-secondary:hover {
+	color: var(--text-normal);
+	border-color: var(--text-faint);
+}
