@@ -12,6 +12,8 @@ import subprocess
 import sys
 import time
 import json
+import signal
+import socket
 from pathlib import Path
 
 import httpx
@@ -31,10 +33,10 @@ ALLOWED_RELATION_TYPES = {
 }
 
 BASE_URL = "http://localhost:8000"
-PROJECT_DIR = Path(__file__).parent
-VAULT_DIR = PROJECT_DIR / "choracle-remote" / "notes"
-MOCK_NOTE = PROJECT_DIR / "test_mock_note.md"
-GRAPH_PATH = PROJECT_DIR / "vault_graph.json"
+PROJECT_DIR = Path(__file__).resolve().parent.parent   # project root
+VAULT_DIR   = PROJECT_DIR / "vault" / "choracle-remote-00" / "notes"
+MOCK_NOTE   = PROJECT_DIR / "test_mock_note.md"
+GRAPH_PATH  = PROJECT_DIR / "vault_graph.json"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -57,6 +59,13 @@ def check(label: str, condition: bool, detail: str = ""):
         print(msg)
 
 
+def port_in_use(port: int) -> bool:
+    """Return True if something is already listening on *port*."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
 def wait_for_server(url: str, timeout: int = 60) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -70,6 +79,15 @@ def wait_for_server(url: str, timeout: int = 60) -> bool:
     return False
 
 
+def _slugify(name: str) -> str:
+    """Normalise a filename stem to a valid note_id slug (lowercase, hyphens only)."""
+    import re
+    slug = name.lower()
+    slug = re.sub(r"[^a-z0-9\-]", "-", slug)
+    slug = re.sub(r"-{2,}", "-", slug).strip("-")
+    return slug or "note"
+
+
 def load_vault_notes() -> list[dict]:
     """Read every .md file from the vault notes directory."""
     notes = []
@@ -77,7 +95,7 @@ def load_vault_notes() -> list[dict]:
         return notes
     for md in VAULT_DIR.glob("*.md"):
         notes.append({
-            "note_id": md.stem,
+            "note_id": _slugify(md.stem),
             "content": md.read_text(encoding="utf-8", errors="replace"),
         })
     return notes
@@ -96,10 +114,14 @@ def main():
 
     # ── Step 1: Start uvicorn ─────────────────────────────────────────
     print("\n[Step 1] Starting uvicorn server...")
+    if port_in_use(8000):
+        print("  ERROR  Port 8000 is already in use — kill the existing server "
+              "before running the test.")
+        sys.exit(1)
     server_proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "server:app",
          "--host", "127.0.0.1", "--port", "8000"],
-        cwd=str(PROJECT_DIR),
+        cwd=str(PROJECT_DIR),   # server.py lives in project root
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -153,11 +175,15 @@ def main():
         print("[Step 4] Validating Data Contract...\n")
 
         # 4a. Top-level shape
-        check("Has 'note_id'", "note_id" in data)
-        check("No 'fields' key (removed)", "fields" not in data)
-        check("Has 'metadata'", "metadata" in data)
-        check("Has 'community_id'", "community_id" in data)
-        check("Has 'community_tiers'", "community_tiers" in data)
+        check("Has 'note_id'",          "note_id"          in data)
+        check("No 'fields' key (removed)", "fields"        not in data)
+        check("Has 'metadata'",         "metadata"         in data)
+        check("Has 'community_id'",     "community_id"     in data)
+        check("Has 'community_tiers'",  "community_tiers"  in data)
+        check("Has 'bridge_detected'",  "bridge_detected"  in data)
+        check("Has 'narrative_audit'",  "narrative_audit"  in data)
+        check("bridge_detected is bool",
+              isinstance(data.get("bridge_detected"), bool))
         check("note_id matches", data.get("note_id") == "the-mask-ceremony")
 
         # 4b. NarrativeMetadata shape
@@ -184,12 +210,27 @@ def main():
         check("All tags use allowed prefixes (topic/, aspect/, affect/, code/)",
               all_allowed, f"tags: {tags}")
 
-        has_topic = any(t.startswith("topic/") for t in tags)
+        has_topic  = any(t.startswith("topic/")  for t in tags)
         has_affect = any(t.startswith("affect/") for t in tags)
-        has_code = any(t.startswith("code/") for t in tags)
+        has_code   = any(t.startswith("code/")   for t in tags)
         check("Has topic/ tag (BERTopic)", has_topic, f"tags: {tags}")
-        check("Has affect/ tag (Ollama)", has_affect, f"tags: {tags}")
-        check("Has code/ tag (Ollama)", has_code, f"tags: {tags}")
+        check("Has code/ tag (16-beat slug)", has_code, f"tags: {tags}")
+
+        # affect/ only emitted when Narrative Auditor fires (bridge_detected=True)
+        if data.get("bridge_detected"):
+            check("Has affect/ tag (Narrative Auditor, bridge detected)",
+                  has_affect, f"tags: {tags}")
+            audit = data.get("narrative_audit") or {}
+            check("narrative_audit.beat_position is set",
+                  isinstance(audit.get("beat_position"), str)
+                  and len(audit.get("beat_position", "")) > 0)
+            check("narrative_audit.narrative_summary is set",
+                  isinstance(audit.get("narrative_summary"), str))
+        else:
+            print("  INFO  bridge_detected=False: Narrative Auditor not triggered; "
+                  "affect/ tag omitted (expected)")
+            check("narrative_audit is null when no bridge",
+                  data.get("narrative_audit") is None)
 
         # aspect/ is a soft check — spaCy may find no entities in short notes
         has_aspect = any(t.startswith("aspect/") for t in tags)
@@ -232,8 +273,9 @@ def main():
             graph_data = json.loads(GRAPH_PATH.read_text(encoding="utf-8"))
             check("Persisted graph has nodes",
                   len(graph_data.get("nodes", [])) > 0)
-            check("Persisted graph has links",
-                  len(graph_data.get("links", [])) > 0)
+            # NetworkX 3.4+ saves edges under "edges"; older versions used "links"
+            edges = graph_data.get("links") or graph_data.get("edges", [])
+            check("Persisted graph has edges", len(edges) > 0)
 
         # ── Step 6: Verify /graph/communities/multi ───────────────────
         print("\n[Step 6] Verifying multi-resolution endpoint...")

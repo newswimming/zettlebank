@@ -730,10 +730,25 @@ def _classify_relations(
 
 
 def _load_pipeline_models() -> None:
-    """Load spaCy and BERTopic models at startup."""
+    """Load spaCy and BERTopic models at startup.
+
+    Attempts to load SPACY_MODEL (default: en_core_web_trf). Falls back to
+    en_core_web_sm if the trf model is not installed (e.g. Python 3.13 on
+    Windows where curated-tokenizers fails to compile). Set SPACY_MODEL=en_core_web_sm
+    in .env to use the smaller model explicitly.
+    """
     global _nlp
-    _nlp = spacy.load(SPACY_MODEL)
-    logger.info(f"spaCy {SPACY_MODEL} loaded")
+    try:
+        _nlp = spacy.load(SPACY_MODEL)
+        logger.info("spaCy model loaded: %s", SPACY_MODEL)
+    except OSError:
+        fallback = "en_core_web_sm"
+        logger.warning(
+            "spaCy model '%s' not found — falling back to '%s'. "
+            "For full transformer NER run: python -m spacy download %s",
+            SPACY_MODEL, fallback, SPACY_MODEL,
+        )
+        _nlp = spacy.load(fallback)
     _fit_bertopic_on_vault()
 
 
