@@ -216,10 +216,11 @@ def main():
         check("Has topic/ tag (BERTopic)", has_topic, f"tags: {tags}")
         check("Has code/ tag (16-beat slug)", has_code, f"tags: {tags}")
 
-        # affect/ only emitted when Narrative Auditor fires (bridge_detected=True)
+        # affect/ is now unconditional — Stage D runs for every note
+        check("Has affect/ tag (Stage D, unconditional)", has_affect, f"tags: {tags}")
+
+        # Narrative Auditor only fires on bridge_detected=True (beat position + summary)
         if data.get("bridge_detected"):
-            check("Has affect/ tag (Narrative Auditor, bridge detected)",
-                  has_affect, f"tags: {tags}")
             audit = data.get("narrative_audit") or {}
             check("narrative_audit.beat_position is set",
                   isinstance(audit.get("beat_position"), str)
@@ -227,8 +228,7 @@ def main():
             check("narrative_audit.narrative_summary is set",
                   isinstance(audit.get("narrative_summary"), str))
         else:
-            print("  INFO  bridge_detected=False: Narrative Auditor not triggered; "
-                  "affect/ tag omitted (expected)")
+            print("  INFO  bridge_detected=False: Narrative Auditor not triggered (expected)")
             check("narrative_audit is null when no bridge",
                   data.get("narrative_audit") is None)
 

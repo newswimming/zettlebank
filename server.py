@@ -1269,6 +1269,36 @@ def _default_beat_from_community(
     return "ki-1"
 
 
+async def _run_stage_d_llm_classify(content: str) -> list[str]:
+    """Stage D — fast affect scoring, unconditional on every note.
+
+    Uses OLLAMA_MODEL (lightweight) to classify valence only: positive,
+    negative, or mu (neutral/ambiguous).  Returns a single-element list
+    e.g. ``["affect/positive"]``.
+
+    Kept intentionally minimal — the prompt asks for one field so the LLM
+    has no opportunity to hallucinate unrelated output.  The heavy Narrative
+    Auditor is reserved for Ten-candidates (bridge_detected=True).
+    """
+    prompt = (
+        "You are a valence classifier for a knowledge graph.\n"
+        "Read the note excerpt and respond with valid JSON only:\n"
+        '{"affect": "<positive|negative|mu>"}\n\n'
+        f"Text:\n{content[:1500]}\n\nJSON:"
+    )
+    try:
+        result = await _ollama_complete(prompt, model=OLLAMA_MODEL, json_mode=True)
+        if not isinstance(result, dict):
+            return ["affect/mu"]
+        affect = str(result.get("affect", "mu")).strip()
+        if affect not in AFFECT_VALUES:
+            affect = "mu"
+        return [f"affect/{affect}"]
+    except Exception as exc:
+        logger.warning("Stage D affect error: %s", exc)
+        return ["affect/mu"]
+
+
 async def _run_narrative_auditor(
     note_id: str,
     content: str,
@@ -1303,7 +1333,6 @@ async def _run_narrative_auditor(
         "Respond with valid JSON only — no prose before or after:\n"
         "{\n"
         '  "beat_position": "<one beat slug from: ' + beat_list + '>",\n'
-        '  "affect": "<positive|negative|mu>",\n'
         '  "narrative_summary": "<2-3 sentences on this note\'s bridge function>"\n'
         "}\n\n"
         f"Text:\n{content[:2000]}\n\nJSON:"
@@ -1326,10 +1355,6 @@ async def _run_narrative_auditor(
         if beat not in BEAT_CODES:
             beat = fallback_beat
 
-        affect = str(result.get("affect", "mu")).strip()
-        if affect not in AFFECT_VALUES:
-            affect = "mu"
-
         # M-1: Sanitize narrative_summary to prevent YAML-breaking content.
         summary = str(result.get("narrative_summary", "")).strip()
         summary = re.sub(r"[\r\n]+", " ", summary)[:500]
@@ -1339,7 +1364,7 @@ async def _run_narrative_auditor(
             bridge_note_ids=[_slugify(n) for n in bridge_nodes if _slugify(n)],
             narrative_summary=summary,
         )
-        return [f"affect/{affect}", f"code/{beat}"], audit
+        return [f"code/{beat}"], audit
 
     except Exception as exc:
         logger.warning("Narrative Auditor error: %s", exc)
@@ -1469,11 +1494,15 @@ async def analyze(req: AnalyzeRequest):
         req.note_id, bridge_score, bridge_detected, len(bridge_nodes),
     )
 
-    # --- Agent 2: Semantic Agent (spaCy trf, sequential) ---
-    # Stage B (BERTopic, CPU-only) runs concurrently — no VRAM overlap.
-    topic_tags, aspect_tags = await asyncio.gather(
+    # --- Agent 2: Semantic Agent + Stage D affect (all parallel) ---
+    # Stage B (BERTopic), Stage C (spaCy NER), and Stage D (affect scoring)
+    # run concurrently.  Stage D is unconditional — every note gets an
+    # affect tag.  The Narrative Auditor (Agent 3) is reserved for
+    # Ten-candidates (bridge_detected=True) and handles only beat position.
+    topic_tags, aspect_tags, affect_tags = await asyncio.gather(
         _run_stage_b_topic(req.content, req.note_id, macro_id, macro),
         asyncio.to_thread(_run_stage_c_aspects, req.content),
+        _run_stage_d_llm_classify(req.content),
     )
 
     # --- Macro-act assignment — runs after Stage C so aspect tags are available ---
@@ -1509,7 +1538,9 @@ async def analyze(req: AnalyzeRequest):
         narrative_audit = None
 
     # Assemble final tag list
-    tags = _assemble_tags(topic_tags, aspect_tags, llm_tags, [], limit=10)
+    # affect_tags: from Stage D (unconditional valence, e.g. ["affect/positive"])
+    # llm_tags:    code/ beat from Narrative Auditor or community-label fallback
+    tags = _assemble_tags(topic_tags, aspect_tags, affect_tags, llm_tags, limit=10)
 
     # Build community tier info
     tiers: list[CommunityTier] = []
