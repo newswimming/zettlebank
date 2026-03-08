@@ -21,6 +21,7 @@ from collections import Counter
 from enum import Enum
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 import httpx as httpx_client
 import numpy as np
@@ -70,6 +71,13 @@ except ImportError:
 
 _VAULT_DIR = os.environ.get("VAULT_DIR", "choracle-remote-00")
 
+# H-2: Guard against path-traversal via VAULT_DIR env variable.
+_vault_path = Path(_VAULT_DIR)
+if _vault_path.is_absolute() or ".." in _vault_path.parts:
+    raise ValueError(
+        f"VAULT_DIR must be a relative path without '..', got: {_VAULT_DIR!r}"
+    )
+
 # Graph persistence path
 GRAPH_PATH = Path(__file__).parent / "vault_graph.json"
 
@@ -87,6 +95,13 @@ BERTOPIC_PATH = Path(__file__).parent / "bertopic_model"
 OLLAMA_BASE_URL         = os.environ.get("OLLAMA_BASE_URL",         "http://localhost:11434")
 OLLAMA_MODEL            = os.environ.get("OLLAMA_MODEL",            "llama3.2")
 NARRATIVE_AUDITOR_MODEL = os.environ.get("NARRATIVE_AUDITOR_MODEL", "llama3.1")
+
+# H-1: Guard against SSRF via OLLAMA_BASE_URL.
+_parsed_ollama = urlparse(OLLAMA_BASE_URL)
+if _parsed_ollama.scheme not in ("http", "https"):
+    raise ValueError(
+        f"OLLAMA_BASE_URL must use http or https, got scheme: {_parsed_ollama.scheme!r}"
+    )
 
 # spaCy model
 SPACY_MODEL = os.environ.get("SPACY_MODEL", "en_core_web_trf")
@@ -112,7 +127,14 @@ AFFECT_VALUES = {"positive", "negative", "mu"}
 CODE_VALUES = {"qi", "law", "mu"}
 
 # Structural bridge threshold: Burt constraint below this → Ten-pivot candidate
-BURT_BRIDGE_THRESHOLD = float(os.environ.get("BURT_BRIDGE_THRESHOLD", "0.4"))
+# M-3: Defensive parse — bad env value falls back to 0.4 rather than crashing at import.
+try:
+    BURT_BRIDGE_THRESHOLD = float(os.environ.get("BURT_BRIDGE_THRESHOLD", "0.4"))
+except ValueError:
+    logging.getLogger("zettlebank").warning(
+        "Invalid BURT_BRIDGE_THRESHOLD env value; using default 0.4"
+    )
+    BURT_BRIDGE_THRESHOLD = 0.4
 
 # 16-beat Kishōtenketsu codes (CLAUDE.md Rule 2) — used by the Narrative Auditor
 BEAT_CODES = {
@@ -243,9 +265,32 @@ class NarrativeMetadata(BaseModel):
     )
 
 
+# C-1, C-2: note_id slug pattern enforced at the Pydantic boundary.
+# H-4: content length capped at the API boundary (50 000 chars ≈ ~40 KB UTF-8).
+_NOTE_ID_PATTERN = r"^[a-z0-9][a-z0-9\-]{0,127}$"
+_CONTENT_MAX = 50_000
+
+
 class AnalyzeRequest(BaseModel):
-    note_id: str
-    content: str
+    note_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=128,
+        pattern=_NOTE_ID_PATTERN,
+        description="Slugified note filename stem (lowercase, hyphens, no traversal).",
+    )
+    content: str = Field(
+        ...,
+        min_length=1,
+        max_length=_CONTENT_MAX,
+        description="Note markdown body (frontmatter included). Max 50 000 chars.",
+    )
+
+
+class IngestItem(BaseModel):
+    """One item for POST /graph/ingest — M-6: typed model replaces list[dict]."""
+    note_id: str = Field(..., min_length=1, max_length=128, pattern=_NOTE_ID_PATTERN)
+    content: str = Field(default="", max_length=_CONTENT_MAX)
 
 
 class CommunityTier(BaseModel):
@@ -298,11 +343,20 @@ def _save_graph() -> None:
 def _load_graph() -> None:
     """Restore the graph from disk on server startup."""
     global graph
-    if GRAPH_PATH.exists():
+    if not GRAPH_PATH.exists():
+        return
+    try:
         raw = json.loads(GRAPH_PATH.read_text(encoding="utf-8"))
+        # L-5: Validate structure before deserialization to catch corrupted files.
+        if raw.get("multigraph", False):
+            raise ValueError("vault_graph.json must not be a multigraph")
+        if not raw.get("directed", True):
+            raise ValueError("vault_graph.json must be a directed graph")
         # NetworkX 3.4+ uses "edges" key; older persisted files use "links".
         edges_key = "links" if "links" in raw else "edges"
         graph = nx.node_link_graph(raw, directed=True, edges=edges_key)
+    except Exception as exc:
+        logger.error("_load_graph: failed to load vault_graph.json (%s); starting empty", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -936,7 +990,8 @@ async def _ollama_complete(prompt: str, model: str = OLLAMA_MODEL,
     if json_mode:
         payload["format"] = "json"
 
-    async with httpx_client.AsyncClient(timeout=60.0) as client:
+    # H-1: follow_redirects=False prevents redirect-based SSRF chaining.
+    async with httpx_client.AsyncClient(timeout=60.0, follow_redirects=False) as client:
         resp = await client.post(url, json=payload)
         resp.raise_for_status()
         body = resp.json()
@@ -982,7 +1037,11 @@ async def _run_narrative_auditor(
     Only called when Burt constraint < BURT_BRIDGE_THRESHOLD.
     """
     fallback_beat = "ten-9"  # Bridge notes typically occupy the Ten (pivot) act
-    bridge_str = ", ".join(bridge_nodes[:6]) if bridge_nodes else "none identified"
+    # M-4, C-1: Sanitize bridge node IDs before embedding in the LLM prompt.
+    bridge_str = (
+        ", ".join(_slugify(n) for n in bridge_nodes[:6] if _slugify(n))
+        if bridge_nodes else "none identified"
+    )
     beat_list = (
         "ki-1 ki-2 ki-3 ki-4 (Introduction/Ki), "
         "sho-5 sho-6 sho-7 sho-8 (Development/Sho), "
@@ -1027,10 +1086,13 @@ async def _run_narrative_auditor(
         if affect not in AFFECT_VALUES:
             affect = "mu"
 
+        # M-1: Sanitize narrative_summary to prevent YAML-breaking content.
         summary = str(result.get("narrative_summary", "")).strip()
+        summary = re.sub(r"[\r\n]+", " ", summary)[:500]
+        summary = summary.replace("---", "- - -")
         audit = NarrativeAudit(
             beat_position=beat,
-            bridge_note_ids=bridge_nodes,
+            bridge_note_ids=[_slugify(n) for n in bridge_nodes if _slugify(n)],
             narrative_summary=summary,
         )
         return [f"affect/{affect}", f"code/{beat}"], audit
@@ -1067,8 +1129,10 @@ def _assemble_tags(
 @app.on_event("startup")
 async def on_startup():
     _load_graph()
-    _load_smart_env()
-    _load_pipeline_models()
+    # L-1: offload synchronous I/O off the event loop.
+    await asyncio.to_thread(_load_smart_env)
+    # H-3: offload heavy transformer + BERTopic load off the event loop.
+    await asyncio.to_thread(_load_pipeline_models)
 
 
 @app.on_event("shutdown")
@@ -1099,7 +1163,8 @@ async def health():
 @app.post("/smart-env/reload")
 async def reload_smart_env():
     """Reload Smart Connections embeddings from disk."""
-    _load_smart_env()
+    # L-1: offload file I/O off the event loop.
+    await asyncio.to_thread(_load_smart_env)
     return {
         "embeddings_loaded": len(_embeddings),
         "outlinks_loaded": len(_sc_outlinks),
@@ -1243,6 +1308,8 @@ async def get_multi_communities():
 
 @app.get("/graph/node/{note_id}")
 async def get_node(note_id: str):
+    # C-2: Normalise path parameter through the same slug convention as AnalyzeRequest.
+    note_id = _slugify(note_id)
     if note_id not in graph:
         raise HTTPException(status_code=404, detail="Node not found.")
     neighbors = {
@@ -1257,26 +1324,22 @@ async def get_node(note_id: str):
 
 
 @app.post("/graph/ingest")
-async def ingest_vault(notes: list[dict]):
+async def ingest_vault(notes: list[IngestItem]):
     """Bulk-ingest notes to build the vault graph before analysis.
 
-    Each dict must have: { "note_id": str, "content": str }
+    M-6: typed IngestItem model replaces unvalidated list[dict].
     This populates the graph with wiki-link edges so that Leiden
     partitions are meaningful from the first /analyze call.
     """
-    for note in notes:
-        nid = note.get("note_id", "")
-        content = note.get("content", "")
-        if not nid:
-            continue
-        _upsert_node(nid, {})
-        links = _extract_wikilinks(content)
-        _upsert_wikilink_edges(nid, links)
+    for item in notes:
+        _upsert_node(item.note_id, {})
+        links = _extract_wikilinks(item.content)
+        _upsert_wikilink_edges(item.note_id, links)
 
     _save_graph()
 
-    # Re-fit BERTopic after bulk ingest so topics reflect new corpus
-    _fit_bertopic_on_vault()
+    # Re-fit BERTopic after bulk ingest — offloaded off the event loop.
+    await asyncio.to_thread(_fit_bertopic_on_vault)
 
     return {
         "ingested": len(notes),
