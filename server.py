@@ -73,10 +73,12 @@ except ImportError:
 _VAULT_DIR = os.environ.get("VAULT_DIR", "choracle-remote-00")
 
 # H-2: Guard against path-traversal via VAULT_DIR env variable.
-_vault_path = Path(_VAULT_DIR)
-if _vault_path.is_absolute() or ".." in _vault_path.parts:
+# Absolute paths are permitted so that vaults outside the server directory
+# (e.g. C:\Users\...\Documents\choracle-remote-01) can be specified in .env.
+_vault_path = Path(_VAULT_DIR.strip())
+if ".." in _vault_path.parts:
     raise ValueError(
-        f"VAULT_DIR must be a relative path without '..', got: {_VAULT_DIR!r}"
+        f"VAULT_DIR must not contain '..', got: {_VAULT_DIR!r}"
     )
 
 # Graph persistence path
