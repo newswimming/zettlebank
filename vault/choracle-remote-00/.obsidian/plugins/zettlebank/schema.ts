@@ -34,10 +34,10 @@ export const ProvenanceEnumSchema = z.enum(["sc_embedding", "wikilink", "llm"]);
 export type ProvenanceType = z.infer<typeof ProvenanceEnumSchema>;
 
 // ---------------------------------------------------------------------------
-// EdgeMatrix — replaces SmartRelation; mirrors server.py EdgeMatrix
+// EdgeMatrix — sole relation schema; mirrors server.py EdgeMatrix
 //
 // The YAML frontmatter key remains `smart_relations` (ADR-003) to preserve
-// Obsidian Dataview query compatibility. Only the model shape changes.
+// Obsidian Dataview query compatibility.
 // ---------------------------------------------------------------------------
 
 export const EdgeMatrixSchema = z.object({

@@ -705,18 +705,19 @@ def _run_leiden(
 def _community_label(community_id: int, membership: dict[str, int]) -> str:
     """Derive a human-readable label for a community.
 
-    Strategy: pick the node with the highest degree inside the community
-    and title-case its note_id (replacing hyphens with spaces).
+    Strategy: pick the node with the highest degree inside the community,
+    title-case its note_id slug, and append the cluster size so the user
+    can see at a glance that the label represents a group of notes.
     """
     members = [n for n, c in membership.items() if c == community_id]
     if not members:
-        return f"Cluster-{community_id}"
+        return f"Cluster-{community_id} (0 notes)"
 
     # Highest-degree node as representative
     best = max(members, key=lambda n: graph.degree(n) if n in graph else 0)
     # Title-case the note_id slug
-    label = best.replace("-", " ").replace("_", " ").strip()
-    return label.title()
+    label = best.replace("-", " ").replace("_", " ").strip().title()
+    return f"{label} Cluster ({len(members)} notes)"
 
 
 def _detect_multi_resolution() -> tuple[
@@ -763,10 +764,17 @@ def _compute_bridge_score(note_id: str) -> float:
 
     Values below BURT_BRIDGE_THRESHOLD indicate structural holes:
     the note bridges otherwise disconnected communities (Ten-pivot candidate).
+
+    Uses nx.Graph(graph) rather than graph.to_undirected() so that parallel
+    directed edges are collapsed into a single undirected edge.  Edge weights
+    are sanitized to at least 0.001 to prevent ZeroDivisionErrors inside
+    nx.constraint().
     """
     if note_id not in graph or graph.number_of_nodes() < 3:
         return 1.0
-    ug = graph.to_undirected()
+    ug = nx.Graph(graph)
+    for u, v, data in ug.edges(data=True):
+        data["weight"] = max(float(data.get("weight", 1.0)), 0.001)
     if ug.degree(note_id) < 2:
         return 1.0
     try:
@@ -794,10 +802,14 @@ def _build_constraint_map() -> dict[str, float]:
 
     Returns {node_id: constraint_value}.  Nodes with fewer than 2 neighbours
     receive 1.0 (fully constrained, no structural hole).
+
+    Uses nx.Graph(graph) and sanitizes weights to avoid ZeroDivisionErrors.
     """
     if graph.number_of_nodes() < 3:
         return {n: 1.0 for n in graph.nodes()}
-    ug = graph.to_undirected()
+    ug = nx.Graph(graph)
+    for u, v, data in ug.edges(data=True):
+        data["weight"] = max(float(data.get("weight", 1.0)), 0.001)
     try:
         raw = nx.constraint(ug)
         return {n: float(v) for n, v in raw.items()}

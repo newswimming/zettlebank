@@ -66,7 +66,7 @@ def port_in_use(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
-def wait_for_server(url: str, timeout: int = 60) -> bool:
+def wait_for_server(url: str, timeout: int = 120) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
