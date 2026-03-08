@@ -2,10 +2,12 @@ import { useState, useCallback, type FC } from "react";
 import type { ApprovedPayload } from "./main";
 import type {
 	AnalyzeResponse,
-	SmartRelation,
+	EdgeMatrix,
 	NarrativeMetadata,
 	NarrativeAudit,
 	RelationType,
+	StructuralHole,
+	CommunityTier,
 } from "./schema";
 
 // ---------------------------------------------------------------------------
@@ -108,6 +110,72 @@ const TagGroupCard: FC<{
 		)}
 	</div>
 );
+
+// ---------------------------------------------------------------------------
+// Structural Card — read-only display of macro-act, communities, Burt score
+// ---------------------------------------------------------------------------
+
+const ACT_LABELS: Record<string, { label: string; kanji: string }> = {
+	ki:    { label: "Ki · Introduction",  kanji: "起" },
+	sho:   { label: "Shō · Development",  kanji: "承" },
+	ten:   { label: "Ten · Pivot",         kanji: "転" },
+	ketsu: { label: "Ketsu · Resolution", kanji: "結" },
+};
+
+/**
+ * Read-only structural analysis card. Displays the predicted Narrative Act,
+ * macro/micro community labels, and Burt's constraint score.
+ * Shown at the top of StagingArea — no user toggles; data-verification only.
+ */
+const StructuralCard: FC<{
+	narrativeAct: string;
+	communityTiers: CommunityTier[];
+	structuralHole: StructuralHole;
+}> = ({ narrativeAct, communityTiers, structuralHole }) => {
+	const act = ACT_LABELS[narrativeAct] ?? { label: narrativeAct, kanji: "?" };
+	const macro = communityTiers.find((t) => t.resolution === 0.5);
+	const micro  = communityTiers.find((t) => t.resolution === 2.0);
+
+	return (
+		<div className="zettlebank-card zettlebank-structural-card">
+			<h4 className="zettlebank-card-label">Structural Analysis</h4>
+
+			<div className="zettlebank-structural-row">
+				<span className="zettlebank-structural-key">Narrative Act</span>
+				<span className="zettlebank-structural-val">
+					<span className="zettlebank-act-kanji">{act.kanji}</span>{" "}
+					{act.label}
+				</span>
+			</div>
+
+			{macro && (
+				<div className="zettlebank-structural-row">
+					<span className="zettlebank-structural-key">Macro (γ=0.5)</span>
+					<span className="zettlebank-structural-val">{macro.label}</span>
+				</div>
+			)}
+
+			{micro && (
+				<div className="zettlebank-structural-row">
+					<span className="zettlebank-structural-key">Micro (γ=2.0)</span>
+					<span className="zettlebank-structural-val">{micro.label}</span>
+				</div>
+			)}
+
+			<div className="zettlebank-structural-row">
+				<span className="zettlebank-structural-key">Burt Constraint</span>
+				<span className="zettlebank-structural-val">
+					{structuralHole.constraint_score.toFixed(3)}
+					{structuralHole.is_ten_candidate && (
+						<span className="zettlebank-pivot-badge">
+							{" "}⚠ High Pivot Potential
+						</span>
+					)}
+				</span>
+			</div>
+		</div>
+	);
+};
 
 // ---------------------------------------------------------------------------
 // Beat Matrix — 4×4 grid of the 16 Kishōtenketsu narrative beats
@@ -220,34 +288,66 @@ const DescriptionCard: FC<{
 );
 
 // ---------------------------------------------------------------------------
+// Provenance icons — small text badges for edge origin
+// ---------------------------------------------------------------------------
+
+const PROVENANCE_ICON: Record<string, string> = {
+	sc_embedding: "~",   // cosine-similarity / Smart Connections
+	wikilink:     "↗",  // regex wiki-link
+	llm:          "✦",  // LLM-inferred
+};
+
+const ACT_SHORT: Record<string, string> = {
+	ki:    "起",
+	sho:   "承",
+	ten:   "転",
+	ketsu: "結",
+};
+
+// ---------------------------------------------------------------------------
 // Relation Card — accept / reject each suggested edge
 // ---------------------------------------------------------------------------
 
 /**
- * A single smart-relation row.
- * - Click the header row to toggle accept/reject.
- * - The link input is editable so users can correct the target note before approving.
+ * A single EdgeMatrix row.
+ * - Click the header to toggle accept/reject.
+ * - The target_id input is editable so the user can correct it before approving.
+ * - Shows provenance badge (embedding / wikilink / llm) and target narrative act.
  */
 const RelationCard: FC<{
-	rel: SmartRelation;
+	rel: EdgeMatrix;
 	accepted: boolean;
-	editedLink: string;
+	editedTargetId: string;
 	onToggle: () => void;
-	onLinkChange: (next: string) => void;
-}> = ({ rel, accepted, editedLink, onToggle, onLinkChange }) => (
+	onTargetChange: (next: string) => void;
+}> = ({ rel, accepted, editedTargetId, onToggle, onTargetChange }) => (
 	<div
 		className={`zettlebank-relation-card ${accepted ? "is-accepted" : "is-rejected"}`}
 	>
 		<div className="zettlebank-relation-header" onClick={onToggle}>
 			<span
 				className="zettlebank-relation-type"
-				style={{ color: RELATION_COLORS[rel.type] }}
+				style={{ color: RELATION_COLORS[rel.relation_type] }}
 			>
-				{rel.type}
+				{rel.relation_type}
 			</span>
 			<span className="zettlebank-relation-confidence">
 				{(rel.confidence * 100).toFixed(0)}%
 			</span>
+			<span
+				className="zettlebank-provenance-badge"
+				title={rel.provenance}
+			>
+				{PROVENANCE_ICON[rel.provenance] ?? rel.provenance}
+			</span>
+			{rel.narrative_act && (
+				<span
+					className="zettlebank-edge-act"
+					title={`Target act: ${rel.narrative_act}`}
+				>
+					{ACT_SHORT[rel.narrative_act] ?? rel.narrative_act}
+				</span>
+			)}
 			<span className="zettlebank-relation-status">
 				{accepted ? "accepted" : "rejected"}
 			</span>
@@ -255,9 +355,9 @@ const RelationCard: FC<{
 		<input
 			className="zettlebank-relation-link-input"
 			type="text"
-			value={editedLink}
-			onChange={(e) => onLinkChange(e.target.value)}
-			placeholder="Target note"
+			value={editedTargetId}
+			onChange={(e) => onTargetChange(e.target.value)}
+			placeholder="Target note id"
 			onClick={(e) => e.stopPropagation()}
 		/>
 	</div>
@@ -306,7 +406,7 @@ const StagingArea: FC<{
 	const [acceptedRels, setAcceptedRels] = useState<Set<string>>(
 		() =>
 			new Set(
-				data.metadata.smart_relations.map((r) => `${r.link}::${r.type}`)
+				data.metadata.smart_relations.map((r) => `${r.target_id}::${r.relation_type}`)
 			)
 	);
 
@@ -319,19 +419,19 @@ const StagingArea: FC<{
 		});
 	}, []);
 
-	// -- Relation link editing (target note overrides) --
-	const [linkEdits, setLinkEdits] = useState<Map<string, string>>(
+	// -- Target-id overrides (user can correct the target slug before approving) --
+	const [targetEdits, setTargetEdits] = useState<Map<string, string>>(
 		() =>
 			new Map(
 				data.metadata.smart_relations.map((r) => [
-					`${r.link}::${r.type}`,
-					r.link,
+					`${r.target_id}::${r.relation_type}`,
+					r.target_id,
 				])
 			)
 	);
 
-	const updateLink = useCallback((key: string, next: string) => {
-		setLinkEdits((prev) => new Map(prev).set(key, next));
+	const updateTargetId = useCallback((key: string, next: string) => {
+		setTargetEdits((prev) => new Map(prev).set(key, next));
 	}, []);
 
 	// -- Beat selection via BeatMatrix --
@@ -358,11 +458,11 @@ const StagingArea: FC<{
 
 	// -- Build ApprovedPayload and hand to plugin --
 	const handleApprove = useCallback(() => {
-		const approvedRelations = data.metadata.smart_relations
-			.filter((r) => acceptedRels.has(`${r.link}::${r.type}`))
+		const approvedRelations: EdgeMatrix[] = data.metadata.smart_relations
+			.filter((r) => acceptedRels.has(`${r.target_id}::${r.relation_type}`))
 			.map((r) => ({
 				...r,
-				link: linkEdits.get(`${r.link}::${r.type}`) ?? r.link,
+				target_id: targetEdits.get(`${r.target_id}::${r.relation_type}`) ?? r.target_id,
 			}));
 
 		const metadata: NarrativeMetadata = {
@@ -378,10 +478,17 @@ const StagingArea: FC<{
 			metadata,
 			community_id: data.community_id,
 		});
-	}, [data, acceptedTags, description, acceptedRels, linkEdits, onApprove]);
+	}, [data, acceptedTags, description, acceptedRels, targetEdits, onApprove]);
 
 	return (
 		<div className="zettlebank-staging">
+			{/* Structural card — read-only, verification before Approve */}
+			<StructuralCard
+				narrativeAct={data.narrative_act}
+				communityTiers={data.community_tiers}
+				structuralHole={data.structural_hole}
+			/>
+
 			{/* Description card */}
 			<DescriptionCard value={description} onChange={setDescription} />
 
@@ -404,20 +511,20 @@ const StagingArea: FC<{
 				/>
 			))}
 
-			{/* Smart relations with editable target links */}
+			{/* EdgeMatrix relations with editable target IDs */}
 			{data.metadata.smart_relations.length > 0 && (
 				<div className="zettlebank-card">
 					<h4 className="zettlebank-card-label">Relations</h4>
 					{data.metadata.smart_relations.map((rel) => {
-						const key = `${rel.link}::${rel.type}`;
+						const key = `${rel.target_id}::${rel.relation_type}`;
 						return (
 							<RelationCard
 								key={key}
 								rel={rel}
 								accepted={acceptedRels.has(key)}
-								editedLink={linkEdits.get(key) ?? rel.link}
+								editedTargetId={targetEdits.get(key) ?? rel.target_id}
 								onToggle={() => toggleRelation(key)}
-								onLinkChange={(v) => updateLink(key, v)}
+								onTargetChange={(v) => updateTargetId(key, v)}
 							/>
 						);
 					})}

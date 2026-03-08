@@ -259,9 +259,9 @@ def main():
         relations = meta.get("smart_relations", [])
         all_valid = True
         for rel in relations:
-            if rel.get("type") not in ALLOWED_RELATION_TYPES:
+            if rel.get("relation_type") not in ALLOWED_RELATION_TYPES:
                 all_valid = False
-                check(f"Relation type '{rel.get('type')}' is allowed",
+                check(f"Relation type '{rel.get('relation_type')}' is allowed",
                       False, f"not in {ALLOWED_RELATION_TYPES}")
         check("All relation types use controlled vocabulary", all_valid)
 

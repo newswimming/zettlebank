@@ -296,6 +296,23 @@
 	border-color: var(--interactive-accent);
 }
 
+.zettlebank-provenance-badge {
+	font-size: 11px;
+	color: var(--text-faint);
+	padding: 0 3px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	font-family: var(--font-monospace);
+	line-height: 1.4;
+}
+
+.zettlebank-edge-act {
+	font-size: 11px;
+	font-weight: 600;
+	color: var(--text-accent);
+	padding: 0 3px;
+}
+
 /* Community badge */
 
 .zettlebank-community {
@@ -362,4 +379,46 @@
 .zettlebank-btn-secondary:hover {
 	color: var(--text-normal);
 	border-color: var(--text-faint);
+}
+
+/* ========================================================================
+   Structural Card — macro-act, community labels, Burt constraint
+   ======================================================================== */
+
+.zettlebank-structural-card {
+	background: var(--background-secondary);
+}
+
+.zettlebank-structural-row {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	padding: 3px 0;
+	font-size: var(--font-ui-smaller);
+}
+
+.zettlebank-structural-key {
+	color: var(--text-muted);
+	min-width: 96px;
+	flex-shrink: 0;
+}
+
+.zettlebank-structural-val {
+	color: var(--text-normal);
+	font-weight: 500;
+}
+
+.zettlebank-act-kanji {
+	font-size: var(--font-ui-small);
+	color: var(--text-accent);
+	font-weight: 600;
+}
+
+.zettlebank-pivot-badge {
+	margin-left: 4px;
+	font-size: 10px;
+	font-weight: 600;
+	color: var(--text-warning, var(--color-orange));
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
 }

@@ -29,6 +29,7 @@ import networkx as nx
 import spacy
 from bertopic import BERTopic
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from leidenalg import find_partition, RBConfigurationVertexPartition
 from pydantic import BaseModel, Field
 from sklearn.cluster import KMeans
@@ -136,6 +137,14 @@ except ValueError:
     )
     BURT_BRIDGE_THRESHOLD = 0.4
 
+# Constraint threshold for Ten-candidate identification in _assign_macro_acts.
+# Nodes with Burt constraint below this are counted as structural-hole candidates.
+try:
+    TEN_CONSTRAINT_THRESHOLD = float(os.environ.get("TEN_CONSTRAINT_THRESHOLD", "0.4"))
+except ValueError:
+    logger.warning("Invalid TEN_CONSTRAINT_THRESHOLD env value; using default 0.4")
+    TEN_CONSTRAINT_THRESHOLD = 0.4
+
 # 16-beat Kishōtenketsu codes (CLAUDE.md Rule 2) — used by the Narrative Auditor
 BEAT_CODES = {
     "ki-1",     "ki-2",     "ki-3",     "ki-4",
@@ -191,6 +200,14 @@ def _spacy_tokenizer(text: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 app = FastAPI(title="ZettleBank Intelligence Layer")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["app://obsidian.md", "capacitor://localhost", "http://localhost"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
+)
+
 graph = nx.DiGraph()
 
 # Pipeline models (loaded at startup)
@@ -219,18 +236,37 @@ class RelationType(str, Enum):
     related = "related"
 
 
-class SmartRelation(BaseModel):
-    """A single edge in the narrative graph.
+class NarrativeActEnum(str, Enum):
+    """Kishōtenketsu macro-act assignment for a community."""
+    ki    = "ki"
+    sho   = "sho"
+    ten   = "ten"
+    ketsu = "ketsu"
 
-    Field names match the frontmatter-template.md schema so the
-    frontend can write them directly into YAML (Shadow Database, ADR-003).
-      - link:       Obsidian wiki-link target  e.g. "[[the-mask-ceremony]]"
-      - type:       controlled vocabulary edge label
-      - confidence: float [0, 1] replacing the old "weight" key
+
+class ProvenanceEnum(str, Enum):
+    """How the edge was generated."""
+    sc_embedding = "sc_embedding"   # cosine similarity via Smart Connections
+    wikilink     = "wikilink"       # regex-extracted [[wiki-link]]
+    llm          = "llm"            # LLM-inferred relation
+
+
+class EdgeMatrix(BaseModel):
+    """A single typed, provenanced edge in the narrative graph.
+
+    The YAML key in frontmatter stays `smart_relations` (ADR-003 Shadow
+    Database pattern) so existing Dataview queries are not broken.
+      - target_id:     slug of the target note
+      - relation_type: controlled vocabulary edge label
+      - narrative_act: macro-act of the target note's community
+      - confidence:    float [0, 1]
+      - provenance:    source of the edge
     """
-    link: str
-    type: RelationType = RelationType.related
-    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    target_id:     str
+    relation_type: RelationType    = RelationType.related
+    narrative_act: NarrativeActEnum = NarrativeActEnum.sho
+    confidence:    float           = Field(default=1.0, ge=0.0, le=1.0)
+    provenance:    ProvenanceEnum  = ProvenanceEnum.sc_embedding
 
 
 class NarrativeMetadata(BaseModel):
@@ -251,9 +287,9 @@ class NarrativeMetadata(BaseModel):
         default_factory=list,
         description="Hierarchical tag list in Obsidian path syntax (e.g. 'topic/ritual_mask', 'affect/positive').",
     )
-    smart_relations: list[SmartRelation] = Field(
+    smart_relations: list[EdgeMatrix] = Field(
         default_factory=list,
-        description="Typed edges to other notes (link + type + confidence).",
+        description="Typed edges to other notes (target_id + relation_type + narrative_act + confidence + provenance).",
     )
     source: Optional[str] = Field(
         default=None,
@@ -320,6 +356,23 @@ class NarrativeAudit(BaseModel):
     )
 
 
+class StructuralHole(BaseModel):
+    """Burt's constraint data for the analyzed note.
+
+    Mirrors schema.ts StructuralHoleSchema — update both together.
+    """
+    constraint_score: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="Burt's constraint value (0=open structural hole, 1=fully constrained).",
+    )
+    is_ten_candidate: bool = Field(
+        default=False,
+        description="True when constraint_score < TEN_CONSTRAINT_THRESHOLD.",
+    )
+
+
 class AnalyzeResponse(BaseModel):
     note_id: str
     metadata: NarrativeMetadata
@@ -327,6 +380,11 @@ class AnalyzeResponse(BaseModel):
     community_tiers: list[CommunityTier] = Field(default_factory=list)
     bridge_detected: bool = False
     narrative_audit: Optional[NarrativeAudit] = None
+    narrative_act: str = Field(
+        default="sho",
+        description="Macro-act assignment for this note's community: ki, sho, ten, or ketsu.",
+    )
+    structural_hole: StructuralHole = Field(default_factory=StructuralHole)
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +396,37 @@ def _save_graph() -> None:
     """Persist the NetworkX graph as node-link JSON."""
     data = nx.node_link_data(graph)
     GRAPH_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _migrate_graph_v1_to_v2() -> None:
+    """Backfill legacy graph edges that pre-date the EdgeMatrix schema.
+
+    Any edge lacking a 'provenance' or 'narrative_act' attribute is assigned
+    conservative defaults so the rest of the pipeline can treat all edges
+    uniformly without version-checking.
+
+    Heuristic for provenance:
+      - relation_type == "related" and no prior provenance → "wikilink"
+      - anything else                                      → "sc_embedding"
+    """
+    updated = 0
+    for _u, _v, data in graph.edges(data=True):
+        changed = False
+        if "provenance" not in data:
+            rel_type = data.get("relation_type", "related")
+            data["provenance"] = (
+                ProvenanceEnum.wikilink.value
+                if rel_type == "related"
+                else ProvenanceEnum.sc_embedding.value
+            )
+            changed = True
+        if "narrative_act" not in data:
+            data["narrative_act"] = NarrativeActEnum.sho.value
+            changed = True
+        if changed:
+            updated += 1
+    if updated:
+        logger.info("_migrate_graph_v1_to_v2: backfilled %d legacy edges", updated)
 
 
 def _load_graph() -> None:
@@ -355,6 +444,7 @@ def _load_graph() -> None:
         # NetworkX 3.4+ uses "edges" key; older persisted files use "links".
         edges_key = "links" if "links" in raw else "edges"
         graph = nx.node_link_graph(raw, directed=True, edges=edges_key)
+        _migrate_graph_v1_to_v2()
     except Exception as exc:
         logger.error("_load_graph: failed to load vault_graph.json (%s); starting empty", exc)
 
@@ -374,14 +464,16 @@ def _extract_wikilinks(content: str) -> list[str]:
     return re.findall(r"\[\[([^\]|]+?)(?:\|[^\]]+)?\]\]", content)
 
 
-def _upsert_edges(source: str, relations: list[SmartRelation]) -> None:
-    """Add or update directed edges with controlled relation types."""
+def _upsert_edges(source: str, relations: list[EdgeMatrix]) -> None:
+    """Add or update directed edges from EdgeMatrix objects."""
     for rel in relations:
         graph.add_edge(
             source,
-            rel.link,
-            relation_type=rel.type.value,
+            rel.target_id,
+            relation_type=rel.relation_type.value,
             weight=rel.confidence,
+            provenance=rel.provenance.value,
+            narrative_act=rel.narrative_act.value,
         )
 
 
@@ -394,6 +486,8 @@ def _upsert_wikilink_edges(source: str, targets: list[str]) -> None:
                 target,
                 relation_type="related",
                 weight=0.5,
+                provenance=ProvenanceEnum.wikilink.value,
+                narrative_act=NarrativeActEnum.sho.value,
             )
 
 
@@ -538,16 +632,17 @@ def _infer_relation_type(
 
 def _generate_smart_relations(
     note_id: str, neighbors: list[tuple[str, float]], limit: int = 5
-) -> list[SmartRelation]:
-    """Generate smart_relations from top-K embedding neighbors + graph data."""
-    relations: list[SmartRelation] = []
+) -> list[EdgeMatrix]:
+    """Generate EdgeMatrix edges from top-K embedding neighbors + graph topology."""
+    relations: list[EdgeMatrix] = []
 
     for neighbor_id, sim_score in neighbors[:limit]:
         rel_type = _infer_relation_type(note_id, neighbor_id, sim_score)
-        relations.append(SmartRelation(
-            link=neighbor_id,
-            type=rel_type,
+        relations.append(EdgeMatrix(
+            target_id=neighbor_id,
+            relation_type=rel_type,
             confidence=round(min(sim_score, 1.0), 3),
+            provenance=ProvenanceEnum.sc_embedding,
         ))
 
     return relations
@@ -694,6 +789,128 @@ def _get_bridge_neighbors(note_id: str, macro: dict[str, int]) -> list[str]:
     return [n for n in all_neighbors if macro.get(n, -2) != note_community]
 
 
+def _build_constraint_map() -> dict[str, float]:
+    """Burt's constraint for every node in the undirected graph projection.
+
+    Returns {node_id: constraint_value}.  Nodes with fewer than 2 neighbours
+    receive 1.0 (fully constrained, no structural hole).
+    """
+    if graph.number_of_nodes() < 3:
+        return {n: 1.0 for n in graph.nodes()}
+    ug = graph.to_undirected()
+    try:
+        raw = nx.constraint(ug)
+        return {n: float(v) for n, v in raw.items()}
+    except Exception:
+        return {n: 1.0 for n in graph.nodes()}
+
+
+def _store_node_tags(note_id: str, tags: list[str]) -> None:
+    """Persist aspect/topic tags on the graph node for cross-note heuristic scoring."""
+    if note_id in graph:
+        graph.nodes[note_id]["tags"] = tags
+    else:
+        graph.add_node(note_id, tags=tags)
+
+
+def _get_all_node_tags() -> dict[str, list[str]]:
+    """Return {note_id: [tags]} for every node that has stored tags."""
+    return {
+        n: data["tags"]
+        for n, data in graph.nodes(data=True)
+        if data.get("tags")
+    }
+
+
+def _assign_macro_acts(
+    macro_membership: dict[str, int],
+    g: nx.DiGraph,
+    constraint_map: dict[str, float],
+    node_tags: dict[str, list[str]],
+) -> dict[int, str]:
+    """Score macro-communities and assign Ki / Sho / Ten / Ketsu acts.
+
+    Priority order:
+    1. Ten   — community with highest concentration of low-constraint nodes
+               (constraint < TEN_CONSTRAINT_THRESHOLD).
+    2. Ki    — community with highest (aspect/place + aspect/time tag count)
+               divided by mean out-degree.
+    3. Ketsu — community with highest in-degree originating from Ki and Ten nodes.
+    4. Sho   — all remaining communities.
+
+    Returns {community_id: act_name}.
+    """
+    community_ids = sorted(set(macro_membership.values()))
+    if not community_ids:
+        return {}
+
+    # Group nodes by community
+    comm_nodes: dict[int, list[str]] = {c: [] for c in community_ids}
+    for node, cid in macro_membership.items():
+        comm_nodes[cid].append(node)
+
+    assigned: dict[int, str] = {}
+
+    # ── Ten: highest concentration of structural-hole nodes ──────────────
+    def _ten_score(cid: int) -> float:
+        nodes = comm_nodes[cid]
+        if not nodes:
+            return 0.0
+        bridge_count = sum(
+            1 for n in nodes if constraint_map.get(n, 1.0) < TEN_CONSTRAINT_THRESHOLD
+        )
+        return bridge_count / len(nodes)
+
+    ten_id = max(community_ids, key=_ten_score)
+    assigned[ten_id] = "ten"
+
+    # ── Ki: highest place/time tag density relative to out-degree ────────
+    def _ki_score(cid: int) -> float:
+        if cid in assigned:
+            return -1.0
+        nodes = comm_nodes[cid]
+        if not nodes:
+            return 0.0
+        tag_count = sum(
+            sum(
+                1 for t in node_tags.get(n, [])
+                if t.startswith("aspect/place") or t.startswith("aspect/time")
+            )
+            for n in nodes
+        )
+        mean_outdeg = sum(g.out_degree(n) for n in nodes) / len(nodes)
+        return tag_count / (mean_outdeg + 1.0)
+
+    remaining = [c for c in community_ids if c not in assigned]
+    if remaining:
+        ki_id = max(remaining, key=_ki_score)
+        assigned[ki_id] = "ki"
+
+        # ── Ketsu: highest in-degree from Ki and Ten nodes ────────────────
+        ki_ten_nodes = set(comm_nodes.get(ten_id, []) + comm_nodes.get(ki_id, []))
+
+        def _ketsu_score(cid: int) -> int:
+            if cid in assigned:
+                return -1
+            target_nodes = set(comm_nodes[cid])
+            return sum(
+                1 for u, v in g.edges()
+                if u in ki_ten_nodes and v in target_nodes
+            )
+
+        remaining2 = [c for c in community_ids if c not in assigned]
+        if remaining2:
+            ketsu_id = max(remaining2, key=_ketsu_score)
+            assigned[ketsu_id] = "ketsu"
+
+    # ── Sho: all remaining ────────────────────────────────────────────────
+    for cid in community_ids:
+        if cid not in assigned:
+            assigned[cid] = "sho"
+
+    return assigned
+
+
 # Legacy single-resolution helper (used by /graph/communities)
 def _detect_communities(resolution: float = 1.0) -> dict[str, int]:
     """Single-resolution Leiden for backward compatibility."""
@@ -710,8 +927,8 @@ def _detect_communities(resolution: float = 1.0) -> dict[str, int]:
 
 def _classify_relations(
     note_id: str, content: str
-) -> tuple[list[SmartRelation], list[tuple[str, float]]]:
-    """Extract relations using Smart Connections top-5 embedding neighbors.
+) -> tuple[list[EdgeMatrix], list[tuple[str, float]]]:
+    """Extract EdgeMatrix edges using Smart Connections top-5 embedding neighbors.
 
     Returns (relations, neighbors) so the caller can reuse neighbors for tags.
     Falls back to empty if note has no embedding.
@@ -1247,6 +1464,27 @@ async def analyze(req: AnalyzeRequest):
         asyncio.to_thread(_run_stage_c_aspects, req.content),
     )
 
+    # --- Macro-act assignment — runs after Stage C so aspect tags are available ---
+    _store_node_tags(req.note_id, aspect_tags)
+    constraint_map = _build_constraint_map()
+    node_tags = _get_all_node_tags()
+    community_act_map = _assign_macro_acts(macro, graph, constraint_map, node_tags)
+    narrative_act = community_act_map.get(macro_id, "sho") if macro_id is not None else "sho"
+
+    # Backfill narrative_act on EdgeMatrix objects using the resolved act map.
+    # Also refresh the stored graph edge attribute so persistence is accurate.
+    for edge in relations:
+        target_cid = macro.get(edge.target_id)
+        act_str = community_act_map.get(target_cid, "sho") if target_cid is not None else "sho"
+        edge.narrative_act = NarrativeActEnum(act_str)
+        if graph.has_edge(req.note_id, edge.target_id):
+            graph[req.note_id][edge.target_id]["narrative_act"] = act_str
+
+    structural_hole = StructuralHole(
+        constraint_score=round(bridge_score, 6),
+        is_ten_candidate=bridge_detected,
+    )
+
     # --- Agent 3: Narrative Auditor — conditional on bridge detection ---
     if bridge_detected:
         logger.info("Narrative Auditor triggered for %s", req.note_id)
@@ -1288,6 +1526,8 @@ async def analyze(req: AnalyzeRequest):
         community_tiers=tiers,
         bridge_detected=bridge_detected,
         narrative_audit=narrative_audit,
+        narrative_act=narrative_act,
+        structural_hole=structural_hole,
     )
 
 

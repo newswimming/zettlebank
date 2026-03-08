@@ -15,7 +15,7 @@ import {
 	validateAnalyzeResponse,
 	type AnalyzeResponse,
 	type NarrativeMetadata,
-	type SmartRelation,
+	type EdgeMatrix,
 } from "./schema";
 
 // ---------------------------------------------------------------------------
@@ -110,14 +110,14 @@ function writeFrontmatter(
 			...new Set([...existingTags, ...approved.metadata.tags]),
 		];
 
-		// 3. Merge smart_relations by link::type key (Shadow Database, ADR-003)
-		const existingRels: SmartRelation[] =
+		// 3. Merge smart_relations by target_id::relation_type key (Shadow Database, ADR-003)
+		const existingRels: EdgeMatrix[] =
 			frontmatter.smart_relations || [];
 		const relMap = new Map(
-			existingRels.map((r) => [`${r.link}::${r.type}`, r])
+			existingRels.map((r) => [`${r.target_id}::${r.relation_type}`, r])
 		);
 		for (const rel of approved.metadata.smart_relations) {
-			relMap.set(`${rel.link}::${rel.type}`, rel);
+			relMap.set(`${rel.target_id}::${rel.relation_type}`, rel);
 		}
 		frontmatter.smart_relations = Array.from(relMap.values());
 
