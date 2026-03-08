@@ -1,0 +1,14 @@
+# Python 3.11–3.13 required. Python 3.14+ breaks spaCy (pydantic.v1 incompatibility).
+# Run with: py -3.13 -m uvicorn server:app --reload
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+httpx>=0.27.0
+networkx>=3.3
+python-igraph>=0.11.6
+leidenalg>=0.10.2
+spacy>=3.7.4
+bertopic>=0.16.2
+pydantic>=2.7.0
+numpy>=1.26.4
+scikit-learn>=1.4.2
+python-dotenv>=1.0.1

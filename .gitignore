@@ -1,0 +1,107 @@
+# =============================================================================
+# ZettleBank — .gitignore
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Python backend
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Trained models and runtime graph state (large, regenerated on startup)
+bertopic_model/
+vault_graph.json
+
+# Logs
+*.log
+server.log
+
+# -----------------------------------------------------------------------------
+# Environment — NEVER commit secrets
+# .env.example is committed; .env is not
+# -----------------------------------------------------------------------------
+.env
+.env.local
+.env.*.local
+
+# -----------------------------------------------------------------------------
+# Node / npm
+# -----------------------------------------------------------------------------
+node_modules/
+
+# Source maps emitted outside of esbuild inline mode
+*.js.map
+
+# -----------------------------------------------------------------------------
+# Obsidian plugin release files — DO NOT IGNORE
+#
+# main.js, manifest.json, and styles.css must be committed so Obsidian can
+# install the plugin directly from GitHub without a local build step.
+# GitHub Releases also attach these three files as release assets.
+# -----------------------------------------------------------------------------
+# (no rules here — these files are intentionally tracked)
+
+# -----------------------------------------------------------------------------
+# Obsidian vault — personal / runtime data
+# -----------------------------------------------------------------------------
+
+# Workspace layout and appearance are machine-specific
+vault/choracle-remote-00/.obsidian/workspace.json
+vault/choracle-remote-00/.obsidian/workspace-mobile.json
+vault/choracle-remote-00/.obsidian/app.json
+vault/choracle-remote-00/.obsidian/appearance.json
+vault/choracle-remote-00/.obsidian/graph.json
+vault/choracle-remote-00/.obsidian/types.json
+vault/choracle-remote-00/.obsidian/core-plugins-migration.json
+vault/choracle-remote-00/.obsidian/text-generator.json
+
+# Smart Connections embedding cache (large, regenerated automatically)
+vault/choracle-remote-00/.smart-env/
+
+# Third-party installed plugins (not owned by this project)
+vault/choracle-remote-00/.obsidian/plugins/smart-connections/
+vault/choracle-remote-00/.obsidian/plugins/obsidian42-brat/
+
+# Vault notes and personal content (not part of the plugin)
+vault/choracle-remote-00/notes/
+vault/choracle-remote-00/Clippings/
+vault/choracle-remote-00/Zotero_citationKey/
+vault/choracle-remote-00/umeya-flower/
+vault/choracle-remote-00/templates/
+vault/choracle-remote-00/textgenerator/
+vault/choracle-remote-00/*.md
+vault/choracle-remote-00/annas-archive.md
+vault/choracle-remote-00/dataview-test.md
+vault/choracle-remote-00/public-space-advocacy.md
+vault/choracle-remote-00/three-fields-feb2026-revised.md
+
+# -----------------------------------------------------------------------------
+# OS-generated files
+# -----------------------------------------------------------------------------
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+
+# -----------------------------------------------------------------------------
+# Editors
+# -----------------------------------------------------------------------------
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
