@@ -1018,6 +1018,139 @@ def _classify_relations(
 
 
 # ---------------------------------------------------------------------------
+# Cross-act edge generation (beat orchestration support)
+#
+# Intra-cluster edges (above) capture semantic similarity within a community.
+# Cross-act edges reach deliberately across community boundaries so the beat
+# orchestrator can traverse a ki → sho → ten → ketsu sequence along typed
+# graph paths rather than being stranded inside a single theme cluster.
+# ---------------------------------------------------------------------------
+
+
+def _find_best_neighbor_in_act(
+    note_id: str,
+    target_act: str,
+    macro: dict[str, int],
+    community_act_map: dict[int, str],
+    exclude_ids: set[str],
+) -> tuple[str, float] | None:
+    """Return the highest-cosine note whose macro-community maps to target_act.
+
+    Falls back to graph-topology (highest-degree node in the target act) when
+    SC embeddings are absent for the source note.  Returns None if no qualifying
+    candidate exists.
+    """
+    if note_id not in _embeddings:
+        # Topology fallback: pick the highest-degree graph node in target_act.
+        candidates = [
+            n for n in graph.nodes()
+            if n != note_id
+            and n not in exclude_ids
+            and community_act_map.get(macro.get(n)) == target_act
+        ]
+        if not candidates:
+            return None
+        best = max(candidates, key=lambda n: graph.degree(n))
+        return (best, 0.3)  # synthetic low-confidence score for topology fallback
+
+    query_vec = _embeddings[note_id]
+    best_id: str | None = None
+    best_score = -1.0
+
+    for other_id, other_vec in _embeddings.items():
+        if other_id == note_id or other_id in exclude_ids:
+            continue
+        other_cid = macro.get(other_id)
+        if community_act_map.get(other_cid) != target_act:
+            continue
+        sim = _cosine_similarity(query_vec, other_vec)
+        if sim > best_score:
+            best_score = sim
+            best_id = other_id
+
+    if best_id is None:
+        return None
+    return (best_id, best_score)
+
+
+def _infer_cross_act_relation_type(source_act: str, target_act: str) -> RelationType:
+    """Act-pair heuristic for cross-community edges.
+
+    Encodes the narrative logic of Kishōtenketsu transitions:
+      ki  → sho  : motivates    (introduction energises development)
+      sho → ten  : potential_to (development latently enables the twist)
+      ten → ketsu: kinetic_to   (twist actively drives resolution)
+      ki  → ten  : contradicts  (foundation held against its pivot — juxtaposition)
+      ten → ki   : contradicts  (reverse — pivot reframes the foundation)
+      *   → ki   : supports     (anything feeding back into the foundation)
+      sho → ketsu: supports     (development feeds directly into resolution)
+      ki  → ketsu: supports     (foundation underlies resolution)
+      default    : related
+    """
+    mapping: dict[tuple[str, str], RelationType] = {
+        ("ki",    "sho"):   RelationType.motivates,
+        ("sho",   "ten"):   RelationType.potential_to,
+        ("ten",   "ketsu"): RelationType.kinetic_to,
+        ("ki",    "ten"):   RelationType.contradicts,
+        ("ten",   "ki"):    RelationType.contradicts,
+        ("sho",   "ki"):    RelationType.supports,
+        ("ketsu", "ki"):    RelationType.supports,
+        ("sho",   "ketsu"): RelationType.supports,
+        ("ki",    "ketsu"): RelationType.supports,
+    }
+    return mapping.get((source_act, target_act), RelationType.related)
+
+
+def _build_cross_act_edges(
+    note_id: str,
+    source_act: str,
+    macro: dict[str, int],
+    community_act_map: dict[int, str],
+    intra_neighbor_ids: set[str],
+) -> list[EdgeMatrix]:
+    """Generate up to 3 cross-act EdgeMatrix edges — one per foreign act.
+
+    For each Kishōtenketsu act that differs from source_act, finds the
+    highest-similarity note in that act and creates a typed edge using
+    _infer_cross_act_relation_type.  narrative_act is set to target_act
+    so the beat orchestrator knows which act each cross-cluster edge reaches.
+
+    Already-selected intra-cluster neighbors are excluded to avoid duplicates.
+    """
+    cross_edges: list[EdgeMatrix] = []
+    exclude = intra_neighbor_ids | {note_id}
+
+    for target_act in ("ki", "sho", "ten", "ketsu"):
+        if target_act == source_act:
+            continue
+
+        result = _find_best_neighbor_in_act(
+            note_id, target_act, macro, community_act_map, exclude
+        )
+        if result is None:
+            continue
+
+        neighbor_id, sim_score = result
+        rel_type = _infer_cross_act_relation_type(source_act, target_act)
+        prov = (
+            ProvenanceEnum.sc_embedding
+            if note_id in _embeddings and neighbor_id in _embeddings
+            else ProvenanceEnum.wikilink
+        )
+
+        cross_edges.append(EdgeMatrix(
+            target_id=neighbor_id,
+            relation_type=rel_type,
+            narrative_act=NarrativeActEnum(target_act),
+            confidence=round(min(sim_score, 1.0), 3),
+            provenance=prov,
+        ))
+        exclude.add(neighbor_id)
+
+    return cross_edges
+
+
+# ---------------------------------------------------------------------------
 # Multi-stage pipeline helpers (Stages B, C, D)
 # ---------------------------------------------------------------------------
 
@@ -1584,6 +1717,26 @@ async def analyze(req: AnalyzeRequest):
         edge.narrative_act = NarrativeActEnum(act_str)
         if graph.has_edge(req.note_id, edge.target_id):
             graph[req.note_id][edge.target_id]["narrative_act"] = act_str
+
+    # --- Cross-act edges: one best neighbor per foreign act ------------------
+    # Runs after community_act_map is resolved so _find_best_neighbor_in_act
+    # can filter candidates by their true act assignment.  These edges cross
+    # community boundaries so the beat orchestrator can walk a full
+    # ki → sho → ten → ketsu sequence in a single graph traversal.
+    intra_ids = {e.target_id for e in relations}
+    cross_relations = _build_cross_act_edges(
+        req.note_id, narrative_act, macro, community_act_map, intra_ids
+    )
+    if cross_relations:
+        _upsert_edges(req.note_id, cross_relations)
+        _save_graph()
+        relations = relations + cross_relations
+        logger.info(
+            "Cross-act edges added: note=%s  source_act=%s  targets=%s",
+            req.note_id,
+            narrative_act,
+            [(e.target_id, e.relation_type, e.narrative_act) for e in cross_relations],
+        )
 
     structural_hole = StructuralHole(
         constraint_score=round(bridge_score, 6),
