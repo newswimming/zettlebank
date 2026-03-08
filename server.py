@@ -630,25 +630,6 @@ def _infer_relation_type(
     return RelationType.related
 
 
-def _generate_smart_relations(
-    note_id: str, neighbors: list[tuple[str, float]], limit: int = 5
-) -> list[EdgeMatrix]:
-    """Generate EdgeMatrix edges from top-K embedding neighbors + graph topology."""
-    relations: list[EdgeMatrix] = []
-
-    for neighbor_id, sim_score in neighbors[:limit]:
-        rel_type = _infer_relation_type(note_id, neighbor_id, sim_score)
-        relations.append(EdgeMatrix(
-            target_id=neighbor_id,
-            relation_type=rel_type,
-            confidence=round(min(sim_score, 1.0), 3),
-            provenance=ProvenanceEnum.sc_embedding,
-        ))
-
-    return relations
-
-
-
 # ---------------------------------------------------------------------------
 # Multi-resolution Leiden (ADR-001)
 #
@@ -937,19 +918,102 @@ def _detect_communities(resolution: float = 1.0) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 
+def _graph_neighbors_fallback(
+    note_id: str, wikilink_targets: list[str], k: int = 5
+) -> list[tuple[str, float]]:
+    """Build a neighbor list from graph topology when SC embeddings are absent.
+
+    Priority order:
+      1. Direct wiki-link targets parsed from note content   (score 0.7)
+      2. Existing graph successors/predecessors by degree    (score ∝ degree)
+
+    Returns list of (neighbor_id, score) capped at k, deduplicated.
+    """
+    seen: set[str] = set()
+    neighbors: list[tuple[str, float]] = []
+
+    # 1. Wiki-link targets from content (highest priority)
+    for raw_target in wikilink_targets:
+        slug = raw_target.lower().strip().replace(" ", "-")
+        slug = re.sub(r"[^a-z0-9-]", "", slug)
+        if slug and slug != note_id and slug not in seen and slug in graph:
+            seen.add(slug)
+            neighbors.append((slug, 0.7))
+
+    if len(neighbors) >= k:
+        return neighbors[:k]
+
+    # 2. Graph topology: successors then predecessors, ranked by degree
+    topology_candidates: list[tuple[str, float]] = []
+    if note_id not in graph:
+        return neighbors[:k]
+    for nid in list(graph.successors(note_id)) + list(graph.predecessors(note_id)):
+        if nid == note_id or nid in seen:
+            continue
+        seen.add(nid)
+        degree = graph.degree(nid)
+        score = round(min(0.6, 0.1 + degree * 0.05), 3)
+        topology_candidates.append((nid, score))
+
+    # Sort by score descending
+    topology_candidates.sort(key=lambda x: x[1], reverse=True)
+    neighbors.extend(topology_candidates[: k - len(neighbors)])
+
+    return neighbors[:k]
+
+
+def _generate_smart_relations_with_provenance(
+    note_id: str, neighbors: list[tuple[str, float]], limit: int = 5
+) -> list[EdgeMatrix]:
+    """Generate EdgeMatrix edges, detecting provenance from actual graph edges."""
+    relations: list[EdgeMatrix] = []
+
+    for neighbor_id, sim_score in neighbors[:limit]:
+        rel_type = _infer_relation_type(note_id, neighbor_id, sim_score)
+
+        # Detect provenance: check if a graph edge exists with wikilink provenance
+        edge_data = graph.get_edge_data(note_id, neighbor_id) or {}
+        edge_prov = edge_data.get("provenance", "")
+        if edge_prov == ProvenanceEnum.wikilink.value:
+            prov = ProvenanceEnum.wikilink
+        elif edge_prov == ProvenanceEnum.llm.value:
+            prov = ProvenanceEnum.llm
+        elif note_id in _embeddings and neighbor_id in _embeddings:
+            prov = ProvenanceEnum.sc_embedding
+        else:
+            prov = ProvenanceEnum.wikilink  # graph-topology fallback
+
+        relations.append(EdgeMatrix(
+            target_id=neighbor_id,
+            relation_type=rel_type,
+            confidence=round(min(sim_score, 1.0), 3),
+            provenance=prov,
+        ))
+
+    return relations
+
+
 def _classify_relations(
     note_id: str, content: str
 ) -> tuple[list[EdgeMatrix], list[tuple[str, float]]]:
-    """Extract EdgeMatrix edges using Smart Connections top-5 embedding neighbors.
+    """Extract EdgeMatrix edges using SC embeddings; falls back to graph topology.
 
     Returns (relations, neighbors) so the caller can reuse neighbors for tags.
-    Falls back to empty if note has no embedding.
+    Strategy:
+      1. SC embeddings available → cosine top-K (original behaviour)
+      2. No embeddings          → wiki-link targets + graph successors/predecessors
     """
     neighbors = _find_top_k_neighbors(note_id, k=5)
+
+    if not neighbors:
+        # Fallback: parse wiki-links from content + use graph topology
+        wikilink_targets = _extract_wikilinks(content)
+        neighbors = _graph_neighbors_fallback(note_id, wikilink_targets, k=5)
+
     if not neighbors:
         return [], []
 
-    relations = _generate_smart_relations(note_id, neighbors, limit=5)
+    relations = _generate_smart_relations_with_provenance(note_id, neighbors, limit=5)
     return relations, neighbors
 
 
