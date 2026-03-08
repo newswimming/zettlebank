@@ -69,7 +69,7 @@ code/ketsu-16 — Echo: a transformed return to the opening image or theme
 ### Mapping to the Pipeline
 
 - **Stage D (Ollama `affect/` + `code/`)**: The LLM must classify beat position using the 16 labels above. The discriminative prompt must offer all 16 `code/ki-*` through `code/ketsu-*` values as choices. The fallback is `code/ki-1` (unplaced introduction), not omission.
-- **Macro Leiden (γ=0.5)**: Macro communities map to Kishōtenketsu **acts** (Ki, Shō, Ten, Ketsu). Community labels should reflect which act dominates the cluster.
+- **Macro Leiden (γ=1.0)**: Macro communities map to Kishōtenketsu **acts** (Ki, Shō, Ten, Ketsu). Community labels should reflect which act dominates the cluster.
 - **Micro Leiden (γ=2.0)**: Micro communities map to **individual beats** within an act. Beat granularity at this resolution is expected and correct.
 - **`smart_relations` edge types**: Relation type selection must consider beat position. Notes in the same act are `supports`; notes in Ten that reframe Ki-act notes are `kinetic_to`; notes that contradict a prior state are `contradicts`.
 
@@ -146,7 +146,7 @@ updated:          # ISO timestamp (written by plugin on every approve)
 
 ## Rule 6 — Graph Logic
 
-- Narrative clustering uses the **Leiden Algorithm** (not Louvain) at two resolutions: macro (γ=0.5) for Kishōtenketsu acts, micro (γ=2.0) for individual scene beats. Review `docs/decisions.md` (ADR-001) before modifying.
+- Narrative clustering uses the **Leiden Algorithm** (not Louvain) at two resolutions: macro (γ=1.0) for Kishōtenketsu acts, micro (γ=2.0) for individual scene beats. Review `docs/decisions.md` (ADR-001) before modifying.
 - Relation type classification is discriminative, not generative (ADR-002). Default fallback is `related`.
 - Beat position (Rule 2) must inform edge type selection — see mapping in Rule 2 § Mapping to the Pipeline.
 
@@ -155,7 +155,7 @@ updated:          # ISO timestamp (written by plugin on every approve)
 ## Rule 7 — Multi-Stage Pipeline
 
 The `/analyze` endpoint runs a multi-stage extraction pipeline:
-- **Stage A** (first, sequential): Graph topology + dual-resolution Leiden (γ=0.5 macro → act, γ=2.0 micro → beat)
+- **Stage A** (first, sequential): Graph topology + dual-resolution Leiden (γ=1.0 macro → act, γ=2.0 micro → beat)
 - **Stage B** (parallel, after A): BERTopic community keywords → Ollama LLM → `topic/<Label>` tag
 - **Stage C** (parallel with B): spaCy NER → `aspect/place`, `aspect/character`, `aspect/time`, `aspect/object`
 - **Stage D** (parallel with B+C): Ollama tinyllama → `affect/<value>` (positive/negative/mu) + `code/<beat>` (one of the 16 Kishōtenketsu beats)

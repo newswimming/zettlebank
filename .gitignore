@@ -16,6 +16,11 @@ venv/
 bertopic_model/
 vault_graph.json
 
+# Edge matrix visualisation build artefacts
+edgematrix-viz.html
+graph_data.json
+_graph_blob.js
+
 # Logs
 *.log
 server.log

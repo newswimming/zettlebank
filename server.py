@@ -58,7 +58,7 @@ RELATION_TYPES = {
 #   γ ≈ 1.0  → Mid-level (default)
 #   γ ≈ 0.5  → Macro-clusters: global themes, acts
 RESOLUTION_MICRO = 2.0
-RESOLUTION_MACRO = 0.5
+RESOLUTION_MACRO = 1.0
 
 # ---------------------------------------------------------------------------
 # Environment config – override any value via .env or shell environment
