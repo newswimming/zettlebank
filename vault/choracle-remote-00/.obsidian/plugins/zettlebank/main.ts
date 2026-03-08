@@ -24,11 +24,23 @@ import {
 
 const VIEW_TYPE = "zettlebank-sidebar";
 
-/** Normalise a filename stem to a valid note_id slug (lowercase, hyphens only). */
-function slugify(name: string): string {
-	return name
+/**
+ * Convert an arbitrary string to a valid backend note_id slug.
+ * Steps (in order):
+ *  1. Lowercase
+ *  2. Trim leading/trailing whitespace
+ *  3. Replace spaces and underscores with hyphens
+ *  4. Remove any character that is not alphanumeric or a hyphen
+ *  5. Collapse consecutive hyphens into one
+ *  6. Strip leading/trailing hyphens
+ * Falls back to "note" if the result is empty.
+ */
+function slugify(text: string): string {
+	return text
 		.toLowerCase()
-		.replace(/[^a-z0-9-]/g, "-")
+		.trim()
+		.replace(/[\s_]+/g, "-")
+		.replace(/[^a-z0-9-]/g, "")
 		.replace(/-{2,}/g, "-")
 		.replace(/^-+|-+$/g, "")
 		|| "note";
@@ -322,7 +334,7 @@ export default class ZettleBankPlugin extends Plugin {
 			const content = await this.app.vault.cachedRead(file);
 			const response = await analyzeNote(
 				slugify(file.basename),
-				content,
+				content.slice(0, 50000),
 				this.settings.backendUrl
 			);
 			// Stage for user approval — do NOT write to frontmatter yet
