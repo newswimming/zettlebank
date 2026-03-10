@@ -19,15 +19,14 @@ comm = json.loads(resp.read())
 macro_map    = comm["macro"]["communities"]   # note_id -> comm_id
 macro_labels = comm["macro"]["labels"]        # str(comm_id) -> label str
 
-# ── Assign Kishōtenketsu act by community size ────────────────────────────────
+# ── Kishōtenketsu act assignments from server ─────────────────────────────────
+# Uses _assign_macro_acts: ten=structural-hole density, ki=place/time tag density,
+# ketsu=in-degree from ki+ten, sho=remainder.  Much richer than a size heuristic.
 
-sizes = Counter(macro_map.values())
-acts = {}
-for cid, sz in sizes.items():
-    if sz >= 7:   acts[str(cid)] = "ki"
-    elif sz >= 4: acts[str(cid)] = "sho"
-    elif sz >= 2: acts[str(cid)] = "ten"
-    else:         acts[str(cid)] = "ketsu"
+resp2 = urllib.request.urlopen("http://127.0.0.1:8000/graph/community-acts", timeout=10)
+acts_data = json.loads(resp2.read())
+acts      = acts_data["community_acts"]   # str(comm_id) -> act
+node_acts = acts_data["node_acts"]        # note_id      -> act (pre-resolved)
 
 # ── Enrich nodes ──────────────────────────────────────────────────────────────
 
@@ -36,13 +35,14 @@ for e in raw_edges:
     degree[e["source"]] += 1
     degree[e["target"]] += 1
 
-node_act = {}  # note_id -> act string
+node_act = {}  # note_id -> act string (populated below, used for bridge detection)
 enriched = []
 for n in raw_nodes:
     nid  = n["id"]
     cid  = macro_map.get(nid, -1)
     lbl  = macro_labels.get(str(cid), f"comm {cid}")
-    act  = acts.get(str(cid), "ketsu")
+    # Use server's _assign_macro_acts result; fall back to "sho" if node not in Leiden
+    act  = node_acts.get(nid) or acts.get(str(cid), "sho")
     node_act[nid] = act
     enriched.append({
         "id":         nid,
@@ -63,6 +63,7 @@ for n in raw_nodes:
 
 enriched_edges = []
 cross_act_count = 0
+ketsu_signal_count = 0
 for e in raw_edges:
     rel_type = e.get("relation_type", "related")
     edge_na  = e.get("narrative_act") or ""
@@ -75,7 +76,16 @@ for e in raw_edges:
         # Backfill act for bridge targets not yet in Leiden community map
         if e["target"] not in node_act and edge_na:
             node_act[e["target"]] = edge_na
-    enriched_edges.append({**e, "cross_act": is_bridge})
+    # Cross-community wikilinks: same-type edges that cross Leiden community boundaries.
+    # Those originating from ki/ten nodes are the raw signal underlying the ketsu heuristic.
+    src_comm = macro_map.get(e["source"], -1)
+    tgt_comm = macro_map.get(e["target"], -1)
+    cross_comm = (src_comm != tgt_comm) and not is_bridge
+    src_act = node_act.get(e["source"], "sho")
+    ketsu_signal = cross_comm and src_act in ("ki", "ten")
+    if ketsu_signal:
+        ketsu_signal_count += 1
+    enriched_edges.append({**e, "cross_act": is_bridge, "cross_comm": cross_comm, "ketsu_signal": ketsu_signal})
 
 # Backfill act for nodes that only appear as bridge targets (not in Leiden)
 for n in enriched:
@@ -89,7 +99,8 @@ data = {
         "nodes":             len(enriched),
         "edges":             len(enriched_edges),
         "cross_act_edges":   cross_act_count,
-        "macro_communities": len(sizes),
+        "ketsu_signals":     ketsu_signal_count,
+        "macro_communities": len(acts),
     },
 }
 
@@ -147,6 +158,7 @@ svg{width:100%;height:100%}
   <div class="stat"><b id="s-nodes">\u2014</b> nodes</div>
   <div class="stat"><b id="s-edges">\u2014</b> edges</div>
   <div class="stat"><b id="s-bridges">\u2014</b> cross-act bridges</div>
+  <div class="stat"><b id="s-ketsu">\u2014</b> ketsu signals</div>
   <div class="stat"><b id="s-comms">\u2014</b> macro communities (\u03b3=1.0)</div>
   <div class="stat" style="margin-left:auto;color:#4b5563">choracle-remote-01</div>
 </header>
@@ -159,6 +171,7 @@ svg{width:100%;height:100%}
     <button class="btn active" id="btn-hulls"    onclick="toggleHulls()">Hulls</button>
     <button class="btn active" id="btn-labels"   onclick="toggleLabels()">Labels</button>
     <button class="btn active" id="btn-bridges"  onclick="toggleBridges()">Bridges</button>
+    <button class="btn active" id="btn-ketsu"    onclick="toggleKetsu()">Ketsu signals</button>
   </div>
 </div>
 <div class="sidebar">
@@ -175,11 +188,11 @@ svg{width:100%;height:100%}
   </div>
   <div class="panel">
     <h2>Narrative Act <span style="color:#4b5563">(narrative_act)</span></h2>
-    <p style="font-size:10px;color:#4b5563;margin-bottom:8px">Kishōtenketsu act inferred from Leiden community size. Richer assignment arrives after /analyze runs on individual notes.</p>
-    <div class="lr"><div class="sw" style="background:#34d399"></div><div><div class="lbl">ki \u8d77 \u2014 Introduction</div><div class="desc">Largest clusters (\u22657 notes). Foundational, well-connected hubs. Low Burt constraint.</div></div></div>
-    <div class="lr"><div class="sw" style="background:#60a5fa"></div><div><div class="lbl">sho \u627f \u2014 Development</div><div class="desc">Medium clusters (4\u20136 notes). Build on and extend ki themes.</div></div></div>
-    <div class="lr"><div class="sw" style="background:#f59e0b"></div><div><div class="lbl">ten \u8ee2 \u2014 Twist</div><div class="desc">Small clusters (2\u20133 notes). Structural bridges, unexpected pivots. High Burt constraint.</div></div></div>
-    <div class="lr"><div class="sw" style="background:#c084fc"></div><div><div class="lbl">ketsu \u7d50 \u2014 Resolution</div><div class="desc">Singleton clusters. Peripheral; awaiting connection via /analyze.</div></div></div>
+    <p style="font-size:10px;color:#4b5563;margin-bottom:8px">Assigned by <code style="color:#818cf8">_assign_macro_acts</code> on the server: place/time tag density (ki), Burt-constraint structural holes (ten), cross-community in-degree from ki+ten nodes (ketsu), remainder (sho).</p>
+    <div class="lr"><div class="sw" style="background:#34d399"></div><div><div class="lbl">ki \u8d77 \u2014 Introduction</div><div class="desc">Highest place/time tag density \u00f7 out-degree. Foundational hubs.</div></div></div>
+    <div class="lr"><div class="sw" style="background:#60a5fa"></div><div><div class="lbl">sho \u627f \u2014 Development</div><div class="desc">Remainder communities. Build on and extend ki themes.</div></div></div>
+    <div class="lr"><div class="sw" style="background:#f59e0b"></div><div><div class="lbl">ten \u8ee2 \u2014 Twist</div><div class="desc">Highest Burt constraint (structural-hole density). Unexpected pivots.</div></div></div>
+    <div class="lr"><div class="sw" style="background:#c084fc"></div><div><div class="lbl">ketsu \u7d50 \u2014 Resolution</div><div class="desc">Highest in-degree from ki+ten nodes across all g.edges().</div></div></div>
   </div>
   <div class="panel">
     <h2>Relation Type <span style="color:#4b5563">(relation_type)</span></h2>
@@ -208,6 +221,13 @@ svg{width:100%;height:100%}
     <p style="font-size:10px;color:#4b5563;margin-top:6px">Arc colour = <strong>target act</strong>. Toggle with the <em>Bridges</em> button. Click an arc to inspect its EdgeMatrix.</p>
   </div>
   <div class="panel">
+    <h2>Ketsu Signals <span style="color:#4b5563">(\u21e2 faint dashed)</span></h2>
+    <p style="font-size:10px;color:#4b5563;margin-bottom:8px">Cross-community wikilinks originating from <strong>ki</strong> or <strong>ten</strong> nodes. These are the raw <code style="color:#818cf8">g.edges()</code> cross-boundary links that generate the <em>ketsu in-degree</em> score — the ketsu heuristic selects the node with the most incoming edges from ki+ten communities. Toggle with the <em>Ketsu signals</em> button.</p>
+    <div class="lr"><div style="width:26px;border-top:1px dashed #34d399;margin-top:5px;flex-shrink:0;opacity:.6"></div><div><div class="lbl" style="color:#34d399">from ki \u8d77</div><div class="desc">ki node wikilinks crossing community boundary</div></div></div>
+    <div class="lr"><div style="width:26px;border-top:1px dashed #f59e0b;margin-top:5px;flex-shrink:0;opacity:.6"></div><div><div class="lbl" style="color:#f59e0b">from ten \u8ee2</div><div class="desc">ten node wikilinks crossing community boundary</div></div></div>
+    <p style="font-size:10px;color:#4b5563;margin-top:6px">Nodes that receive many of these edges are candidates for ketsu assignment.</p>
+  </div>
+  <div class="panel">
     <h2>Confidence <span style="color:#4b5563">(confidence)</span></h2>
     <p style="font-size:10px;color:#64748b">Rendered as edge <strong>opacity</strong>. SC scores map directly; wiki-links default to 0.5; LLM edges carry explicit probability.</p>
   </div>
@@ -228,11 +248,12 @@ const PROV_DASH={sc_embedding:'none',wikilink:'6,4',llm:'2,3'};
 // Cross-act bridge colour: warm white-gold gradient stop
 const BRIDGE_COLOR='#ffffff';
 
-let showHulls=true,showLabels=true,showBridges=true,activeActs=new Set(['ki','sho','ten','ketsu']);
+let showHulls=true,showLabels=true,showBridges=true,showKetsu=true,activeActs=new Set(['ki','sho','ten','ketsu']);
 
 document.getElementById('s-nodes').textContent=STATS.nodes;
 document.getElementById('s-edges').textContent=STATS.edges;
 document.getElementById('s-bridges').textContent=STATS.cross_act_edges||0;
+document.getElementById('s-ketsu').textContent=STATS.ketsu_signals||0;
 document.getElementById('s-comms').textContent=STATS.macro_communities;
 
 const wrap=document.getElementById('graph-wrap');
@@ -263,13 +284,15 @@ feMerge.append('feMergeNode').attr('in','SourceGraphic');
 const hullLayer=g.append('g');
 const lblLayer=g.append('g');
 const edgeLayer=g.append('g');   // intra-cluster edges
+const ketsuLayer=g.append('g');  // cross-community ki/ten edges (ketsu heuristic signal)
 const bridgeLayer=g.append('g'); // cross-act bridge edges (on top)
 const nodeLayer=g.append('g');
 
 const nodes=RAW_NODES.map(d=>({...d}));
 const byId=Object.fromEntries(nodes.map(n=>[n.id,n]));
 const links=RAW_EDGES.map(e=>({...e,source:byId[e.source]||e.source,target:byId[e.target]||e.target}));
-const intraLinks=links.filter(l=>!l.cross_act);
+const intraLinks=links.filter(l=>!l.cross_act&&!l.ketsu_signal);
+const ketsuLinks=links.filter(l=>l.ketsu_signal);
 const bridgeLinks=links.filter(l=>l.cross_act);
 const maxDeg=d3.max(nodes,d=>d.deg)||1;
 const r=d=>5+Math.sqrt(d.deg/maxDeg)*13;
@@ -328,6 +351,17 @@ const bPath=bSel.append('path').attr('class','bi')
   .attr('stroke-dasharray','8,4')
   .attr('marker-end','url(#arr-bridge)');
 
+// ── Ketsu-signal edges (cross-community wikilinks from ki/ten nodes) ───────────
+// These are the g.edges() cross-boundary edges that feed the ketsu in-degree heuristic.
+// Rendered as thin semi-transparent lines coloured by source act.
+const kSel=ketsuLayer.selectAll('.k').data(ketsuLinks).join('line').attr('class','k')
+  .attr('stroke',d=>ACT_COLOR[d.source.act||'ki'])
+  .attr('stroke-width',1)
+  .attr('stroke-opacity',0.28)
+  .attr('stroke-dasharray','3,5')
+  .style('cursor','pointer')
+  .on('mouseover',(e,d)=>showTT(e,kTTHtml(d))).on('mousemove',moveTT).on('mouseout',hideTT);
+
 function bridgePath(d){
   const sx=d.source.x||0,sy=d.source.y||0,tx=d.target.x||0,ty=d.target.y||0;
   // Control point perpendicular to midpoint, scaled by distance
@@ -365,6 +399,8 @@ const lSel=nSel.append('text')
 sim.on('tick',()=>{
   eLine.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y)
        .attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
+  kSel.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y)
+      .attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
   bSel.selectAll('path').attr('d',(_,i,nodes)=>{
     const d=d3.select(nodes[i].parentNode).datum();
     return bridgePath(d);
@@ -406,6 +442,7 @@ function drawHulls(){
 function toggleHulls(){showHulls=!showHulls;document.getElementById('btn-hulls').classList.toggle('active',showHulls);if(!showHulls){hullLayer.selectAll('*').remove();lblLayer.selectAll('*').remove();}}
 function toggleLabels(){showLabels=!showLabels;document.getElementById('btn-labels').classList.toggle('active',showLabels);lSel.attr('display',showLabels?null:'none');}
 function toggleBridges(){showBridges=!showBridges;document.getElementById('btn-bridges').classList.toggle('active',showBridges);bridgeLayer.attr('display',showBridges?null:'none');}
+function toggleKetsu(){showKetsu=!showKetsu;document.getElementById('btn-ketsu').classList.toggle('active',showKetsu);ketsuLayer.attr('display',showKetsu?null:'none');}
 
 function toggleAct(act){
   if(activeActs.has(act))activeActs.delete(act);else activeActs.add(act);
@@ -417,6 +454,10 @@ function applyFilter(){
   eSel.attr('opacity',d=>{
     const sa=d.source.act||'ketsu',ta=d.target.act||'ketsu';
     return(activeActs.has(sa)&&activeActs.has(ta))?1:0.04;
+  });
+  kSel.attr('opacity',d=>{
+    const sa=d.source.act||'ki';
+    return activeActs.has(sa)?0.28:0.04;
   });
   bSel.attr('opacity',d=>{
     const sa=d.source.act||'ketsu',ta=d.target.act||'ketsu';
@@ -432,11 +473,12 @@ function highlight(id){
   });
   nSel.attr('opacity',d=>nb.has(d.id)?1:0.1);
   eSel.attr('opacity',d=>((d.source.id||d.source)===id||(d.target.id||d.target)===id)?1:0.04);
+  kSel.attr('opacity',d=>((d.source.id||d.source)===id||(d.target.id||d.target)===id)?0.7:0.04);
   bSel.attr('opacity',d=>((d.source.id||d.source)===id||(d.target.id||d.target)===id)?1:0.04);
 }
 
 svg.on('click',()=>{
-  nSel.attr('opacity',1);eSel.attr('opacity',1);bSel.attr('opacity',1);applyFilter();
+  nSel.attr('opacity',1);eSel.attr('opacity',1);kSel.attr('opacity',0.28);bSel.attr('opacity',1);applyFilter();
   document.getElementById('info').style.display='none';
 });
 
@@ -465,6 +507,17 @@ function eTTHtml(d){
 <div class="tr"><span class="tk">narrative_act</span><span class="tv"><span class="badge" style="background:${ac}22;color:${ac}">${d.narrative_act}</span></span></div>
 <div class="tr"><span class="tk">confidence</span><span class="tv">${(d.confidence||0.5).toFixed(2)}</span></div>
 <div class="tr"><span class="tk">provenance</span><span class="tv">${d.provenance}</span></div>`}
+
+function kTTHtml(d){
+  const sa=ACT_COLOR[d.source.act||'ki'],ta=ACT_COLOR[d.target.act||'ketsu'];
+  const src=d.source.id||d.source,tgt=d.target.id||d.target;
+  return`<div class="tt-h" style="color:#94a3b8">\u21e2 Ketsu Signal</div>
+<div class="tr"><span class="tk">source</span><span class="tv" style="font-size:9px">${src}</span></div>
+<div class="tr"><span class="tk">source act</span><span class="tv"><span class="badge" style="background:${sa}22;color:${sa}">${d.source.act}</span></span></div>
+<div class="tr"><span class="tk">target_id</span><span class="tv" style="font-size:9px">${tgt}</span></div>
+<div class="tr"><span class="tk">target act</span><span class="tv"><span class="badge" style="background:${ta}22;color:${ta}">${d.target.act}</span></span></div>
+<div class="tr"><span class="tk">provenance</span><span class="tv">${d.provenance||'wikilink'}</span></div>
+<div style="font-size:9px;color:#4b5563;margin-top:4px">Cross-community wikilink feeding ketsu in-degree heuristic</div>`}
 
 function bridgeTTHtml(d){
   const c=REL_COLOR[d.relation_type]||'#94a3b8';

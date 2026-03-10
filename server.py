@@ -1037,42 +1037,52 @@ def _find_best_neighbor_in_act(
     community_act_map: dict[int, str],
     exclude_ids: set[str],
 ) -> tuple[str, float] | None:
-    """Return the highest-cosine note whose macro-community maps to target_act.
+    """Return the best-matching note in target_act.
 
-    Falls back to graph-topology (highest-degree node in the target act) when
-    SC embeddings are absent for the source note.  Returns None if no qualifying
-    candidate exists.
+    Tier 1: existing wikilink successors that map to target_act
+            (scored by cosine if embeddings available, otherwise degree).
+    Tier 2: pure cosine across all target-act candidates; degree fallback
+            when embeddings are absent for the source note.
+    Returns None if no qualifying candidate exists.
     """
-    if note_id not in _embeddings:
-        # Topology fallback: pick the highest-degree graph node in target_act.
-        candidates = [
-            n for n in graph.nodes()
-            if n != note_id
-            and n not in exclude_ids
-            and community_act_map.get(macro.get(n)) == target_act
-        ]
-        if not candidates:
-            return None
-        best = max(candidates, key=lambda n: graph.degree(n))
-        return (best, 0.3)  # synthetic low-confidence score for topology fallback
+    all_candidates = [
+        n for n in graph.nodes()
+        if n != note_id
+        and n not in exclude_ids
+        and community_act_map.get(macro.get(n)) == target_act
+    ]
+    if not all_candidates:
+        return None
 
-    query_vec = _embeddings[note_id]
+    def _score(nid: str) -> float:
+        if note_id in _embeddings and nid in _embeddings:
+            return _cosine_similarity(_embeddings[note_id], _embeddings[nid])
+        return graph.degree(nid) / max(1, graph.number_of_nodes())
+
+    # Tier 1: prefer existing wikilink edges into target_act
+    candidate_set = set(all_candidates)
+    wikilink_candidates = [n for n in graph.successors(note_id) if n in candidate_set]
+    if wikilink_candidates:
+        best = max(wikilink_candidates, key=_score)
+        return (best, max(_score(best), 0.6))
+
+    # Tier 2: cosine similarity across all candidates; degree fallback
+    if note_id not in _embeddings:
+        best = max(all_candidates, key=lambda n: graph.degree(n))
+        return (best, 0.3)
+
     best_id: str | None = None
     best_score = -1.0
-
-    for other_id, other_vec in _embeddings.items():
-        if other_id == note_id or other_id in exclude_ids:
-            continue
-        other_cid = macro.get(other_id)
-        if community_act_map.get(other_cid) != target_act:
-            continue
-        sim = _cosine_similarity(query_vec, other_vec)
-        if sim > best_score:
-            best_score = sim
-            best_id = other_id
+    for nid in all_candidates:
+        if nid in _embeddings:
+            sim = _cosine_similarity(_embeddings[note_id], _embeddings[nid])
+            if sim > best_score:
+                best_score = sim
+                best_id = nid
 
     if best_id is None:
-        return None
+        best_id = max(all_candidates, key=lambda n: graph.degree(n))
+        return (best_id, 0.3)
     return (best_id, best_score)
 
 
