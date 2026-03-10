@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import uuid
 from collections import Counter
@@ -1820,6 +1821,208 @@ async def get_multi_communities():
             "communities": micro,
             "labels": micro_labels,
         },
+    }
+
+
+@app.get("/graph/community-acts")
+async def get_community_acts():
+    """Return the Kishōtenketsu act assigned to each macro community.
+
+    Uses the same _assign_macro_acts logic as /analyze:
+      - ten   = highest Burt-constraint structural-hole density
+      - ki    = highest aspect/place + aspect/time tag density / mean out-degree
+      - ketsu = highest in-degree from ki + ten nodes
+      - sho   = all remaining communities
+    """
+    macro, _micro, _ml, _mml = _detect_multi_resolution()
+    constraint_map = _build_constraint_map()
+    node_tags = _get_all_node_tags()
+    community_act_map = _assign_macro_acts(macro, graph, constraint_map, node_tags)
+    # Also return per-node act for convenience
+    node_act_map = {node_id: community_act_map.get(cid, "sho")
+                    for node_id, cid in macro.items()}
+    return {
+        "community_acts": {str(k): v for k, v in community_act_map.items()},
+        "node_acts": node_act_map,
+    }
+
+
+# ── Story generation helpers ──────────────────────────────────────────────────
+
+def _read_note_text(note_id: str) -> str | None:
+    """Return stripped body text for note_id by scanning vault for matching .md."""
+    for md in _vault_path.rglob("*.md"):
+        if md.stem == note_id or _slugify(md.stem) == note_id:
+            return _strip_frontmatter(md.read_text(encoding="utf-8", errors="replace"))
+    return None
+
+
+def _act_nodes_map(
+    node_act_map: dict[str, str],
+) -> dict[str, list[str]]:
+    """Group note_ids by act."""
+    groups: dict[str, list[str]] = {"ki": [], "sho": [], "ten": [], "ketsu": []}
+    for nid, act in node_act_map.items():
+        if act in groups:
+            groups[act].append(nid)
+    return groups
+
+
+def _rank_by_sc_similarity(
+    anchor_id: str, candidates: list[str]
+) -> list[str]:
+    """Return candidates ordered by cosine similarity to anchor's SC embedding.
+
+    Candidates without an SC embedding are appended in their original order.
+    """
+    if anchor_id not in _embeddings or not candidates:
+        return candidates
+    anchor_vec = _embeddings[anchor_id]
+    scored, unscored = [], []
+    for nid in candidates:
+        if nid in _embeddings:
+            sim = _cosine_similarity(anchor_vec, _embeddings[nid])
+            scored.append((nid, sim))
+        else:
+            unscored.append(nid)
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [n for n, _ in scored] + unscored
+
+
+async def _summarize_note_to_two_sentences(note_text: str, act: str) -> str:
+    """Ask llama3.1 to condense a note into exactly 2 sentences for the given act."""
+    act_roles = {
+        "ki":    "introduce a subject, place, or concept — set the scene",
+        "sho":   "develop and elaborate on an established idea",
+        "ten":   "introduce an unexpected angle or reframe the subject",
+        "ketsu": "resolve, synthesise, or bring matters to a close",
+    }
+    role = act_roles.get(act, "continue the narrative")
+    prompt = (
+        f"Summarise the following note into exactly 2 sentences that {role}. "
+        f"Be concrete and evocative. Output only the 2 sentences — no preamble, "
+        f"no labels, no bullet points.\n\nNote:\n{note_text[:2000]}"
+    )
+    result = await _ollama_complete(prompt, model=NARRATIVE_AUDITOR_MODEL, json_mode=False)
+    return str(result).strip()
+
+
+async def _synthesize_beat(
+    summaries: list[str], act: str, prior_beats: str
+) -> str:
+    """Weave two note summaries into a 2-sentence beat using act-specific guidance."""
+    act_instructions = {
+        "ki":    "Set the scene and introduce the core subject. No conflict yet.",
+        "sho":   "Deepen what was introduced. Show a development or consequence.",
+        "ten":   "Introduce a surprising turn. Subvert the expectation from the previous beat.",
+        "ketsu": "Bring everything together. The ending should feel earned and complete.",
+    }
+    instruction = act_instructions.get(act, "Continue the narrative.")
+    prior_ctx = f"Story so far:\n{prior_beats}\n\n" if prior_beats else ""
+    prompt = (
+        f"{prior_ctx}You are a narrative composer using Kishōtenketsu structure.\n"
+        f"Act: {act.upper()} — {instruction}\n\n"
+        f"Using these two source summaries as raw material:\n"
+        f"1. {summaries[0]}\n"
+        f"2. {summaries[1]}\n\n"
+        f"Write exactly 2 sentences for this beat. "
+        f"Output only the 2 sentences — no preamble, no labels."
+    )
+    result = await _ollama_complete(prompt, model=NARRATIVE_AUDITOR_MODEL, json_mode=False)
+    return str(result).strip()
+
+
+class StoryRequest(BaseModel):
+    anchor_note_id: Optional[str] = None  # ki anchor; auto-selects highest-degree ki node if omitted
+    seed: Optional[int] = None            # set for reproducible random sampling
+
+
+@app.post("/story/generate")
+async def generate_story(req: StoryRequest):
+    """Generate a 4-beat Kishōtenketsu story grounded in vault notes.
+
+    Pipeline per beat:
+      1. Anchor = existing cross-act bridge target (or highest-degree node in act).
+      2. Rank act-community notes by SC cosine similarity to anchor (re-embed at query).
+      3. Randomly sample 2 from top-10 ranked candidates.
+      4. Summarise each sampled note → 2 sentences via llama3.1.
+      5. Synthesise a 2-sentence beat from the two summaries via llama3.1.
+      6. Accumulate beat text as context for the next act.
+    """
+    # ── 1. Act assignments ────────────────────────────────────────────────────
+    macro, _micro, _ml, _mml = _detect_multi_resolution()
+    constraint_map = _build_constraint_map()
+    node_tags = _get_all_node_tags()
+    community_act_map = _assign_macro_acts(macro, graph, constraint_map, node_tags)
+    node_act_map = {nid: community_act_map.get(cid, "sho") for nid, cid in macro.items()}
+    act_nodes = _act_nodes_map(node_act_map)
+
+    # ── 2. Ki anchor ──────────────────────────────────────────────────────────
+    if req.anchor_note_id and req.anchor_note_id in node_act_map:
+        ki_anchor = req.anchor_note_id
+    else:
+        ki_pool = act_nodes.get("ki", [])
+        if not ki_pool:
+            raise HTTPException(status_code=404, detail="No ki-act nodes in graph. Run /graph/ingest first.")
+        ki_anchor = max(ki_pool, key=lambda n: graph.degree(n))
+
+    # ── 3. Downstream anchors from existing cross-act bridge edges ────────────
+    bridge_anchors: dict[str, str] = {}
+    for _u, v, edata in graph.edges(ki_anchor, data=True):
+        na = edata.get("narrative_act")
+        if isinstance(na, str) and na in ("sho", "ten", "ketsu") and na not in bridge_anchors:
+            bridge_anchors[na] = v
+
+    anchors: dict[str, str] = {"ki": ki_anchor}
+    for act in ("sho", "ten", "ketsu"):
+        if act in bridge_anchors:
+            anchors[act] = bridge_anchors[act]
+        else:
+            pool = act_nodes.get(act, [])
+            anchors[act] = max(pool, key=lambda n: graph.degree(n)) if pool else ki_anchor
+
+    # ── 4. Generate each beat ─────────────────────────────────────────────────
+    rng = random.Random(req.seed)
+    beats = []
+    prior_text = ""
+
+    for act in ("ki", "sho", "ten", "ketsu"):
+        anchor = anchors[act]
+        community = [n for n in act_nodes.get(act, []) if n != anchor]
+
+        # Rank community by SC similarity to anchor, then randomly sample 2 from top-10
+        ranked = _rank_by_sc_similarity(anchor, community)
+        top_k = ranked[:10] if len(ranked) >= 10 else ranked
+        pool = top_k if len(top_k) >= 2 else (ranked + [anchor])
+        sampled = rng.sample(pool, min(2, len(pool)))
+        if len(sampled) < 2:
+            sampled = [anchor, anchor]  # degenerate: single-node community
+
+        # Read full note text for sampled notes
+        summaries = []
+        for nid in sampled:
+            text = _read_note_text(nid) or nid.replace("-", " ").title()
+            summary = await _summarize_note_to_two_sentences(text, act)
+            summaries.append(summary)
+
+        # Synthesise beat from the two summaries
+        beat_text = await _synthesize_beat(summaries, act, prior_text)
+        prior_text = (prior_text + "\n" + beat_text).strip()
+
+        beats.append({
+            "act":       act,
+            "anchor":    anchor,
+            "sources":   sampled,
+            "summaries": summaries,
+            "text":      beat_text,
+        })
+
+        logger.info("Beat generated: act=%s anchor=%s sources=%s", act, anchor, sampled)
+
+    return {
+        "beats":     beats,
+        "traversal": [anchors.get(a, "?") for a in ("ki", "sho", "ten", "ketsu")],
+        "full_story": "\n\n".join(b["text"] for b in beats),
     }
 
 
