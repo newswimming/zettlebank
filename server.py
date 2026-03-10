@@ -1857,6 +1857,17 @@ async def get_community_acts():
     }
 
 
+@app.get("/graph/export")
+async def export_graph():
+    """Export the full in-memory graph as node-link JSON.
+
+    Includes all edge attributes (relation_type, weight, provenance, narrative_act)
+    from the live NetworkX DiGraph so build_viz.py is always consistent with the
+    server state and doesn't need to read vault_graph.json directly.
+    """
+    return nx.node_link_data(graph)
+
+
 # ── Story generation helpers ──────────────────────────────────────────────────
 
 def _read_note_text(note_id: str) -> str | None:

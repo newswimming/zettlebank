@@ -5,10 +5,12 @@ from collections import Counter
 
 ROOT = Path(__file__).parent
 
-# ── Load graph ────────────────────────────────────────────────────────────────
+# ── Load graph from server (always consistent with server's in-memory state) ──
+# /graph/export returns the full NetworkX DiGraph as node-link JSON including
+# all edge attributes (relation_type, provenance, narrative_act).
 
-graph_json = ROOT / "vault_graph.json"  # live graph saved by the Python server
-g = json.loads(graph_json.read_text(encoding="utf-8"))
+resp_g = urllib.request.urlopen("http://127.0.0.1:8000/graph/export", timeout=10)
+g = json.loads(resp_g.read())
 raw_nodes = g["nodes"]
 raw_edges = g.get("edges") or g.get("links", [])
 
