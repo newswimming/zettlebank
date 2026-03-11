@@ -30,6 +30,30 @@ acts_data = json.loads(resp2.read())
 acts      = acts_data["community_acts"]   # str(comm_id) -> act
 node_acts = acts_data["node_acts"]        # note_id      -> act (pre-resolved)
 
+# ── Story generation ───────────────────────────────────────────────────────────
+# Anchor on whichever ki node is best connected; fall back to rituals-of-reproduction.
+
+_ki_nodes = [n for n, a in node_acts.items() if a == "ki"]
+_story_anchor = (
+    max(_ki_nodes, key=lambda n: sum(1 for e in raw_edges if e.get("source") == n or e.get("target") == n))
+    if _ki_nodes else "rituals-of-reproduction"
+)
+print(f"Story anchor: {_story_anchor}")
+try:
+    _story_payload = json.dumps({"anchor_note_id": _story_anchor}).encode()
+    _story_req = urllib.request.Request(
+        "http://127.0.0.1:8000/story/generate",
+        data=_story_payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(_story_req, timeout=300) as _sr:
+        story_data = json.loads(_sr.read())
+    print(f"Story generated: {len(story_data.get('beats', []))} beats")
+except Exception as _e:
+    print(f"Story generation failed: {_e}")
+    story_data = {"beats": [], "traversal": [], "full_story": ""}
+
 # ── Enrich nodes ──────────────────────────────────────────────────────────────
 
 degree = Counter()
@@ -107,6 +131,50 @@ data = {
 }
 
 data_js = "const GRAPH_DATA = " + json.dumps(data, ensure_ascii=False) + ";"
+
+# ── Build story panel HTML ─────────────────────────────────────────────────────
+
+ACT_COLOR_PY = {"ki": "#34d399", "sho": "#60a5fa", "ten": "#f59e0b", "ketsu": "#c084fc"}
+ACT_KANJI    = {"ki": "起", "sho": "承", "ten": "転", "ketsu": "結"}
+ACT_LABEL    = {"ki": "Introduction", "sho": "Development", "ten": "Twist", "ketsu": "Resolution"}
+
+def _slug_label(s: str) -> str:
+    return s.replace("-", " ").title()[:40]
+
+def _build_story_panel() -> str:
+    beats = story_data.get("beats", [])
+    traversal = story_data.get("traversal", [])
+    if not beats:
+        return '<div class="panel"><h2>4-Beat Story</h2><p style="font-size:10px;color:#4b5563">Story generation unavailable.</p></div>'
+
+    trav_html = " \u2192 ".join(
+        f'<span style="color:{ACT_COLOR_PY.get(node_acts.get(n, "sho"), "#94a3b8")};font-weight:700">{_slug_label(n)}</span>'
+        for n in traversal
+    )
+
+    beats_html = ""
+    for b in beats:
+        act  = b.get("act", "sho")
+        col  = ACT_COLOR_PY.get(act, "#94a3b8")
+        kanji = ACT_KANJI.get(act, "")
+        lbl  = ACT_LABEL.get(act, act)
+        anchor = _slug_label(b.get("anchor", ""))
+        sources = ", ".join(_slug_label(s) for s in b.get("sources", []))
+        text = b.get("text", "").replace("<", "&lt;").replace(">", "&gt;")
+        beats_html += f"""
+<div style="margin-bottom:14px;border-left:3px solid {col};padding-left:10px">
+  <div style="font-size:11px;font-weight:700;color:{col};margin-bottom:3px">{kanji} {act.upper()} \u2014 {lbl}</div>
+  <div style="font-size:9px;color:#4b5563;margin-bottom:5px">anchor: <em>{anchor}</em> &middot; sources: <em>{sources}</em></div>
+  <div style="font-size:10px;color:#cbd5e1;line-height:1.6">{text}</div>
+</div>"""
+
+    return f"""<div class="panel" id="story-panel">
+  <h2>起承転結 4-Beat Story <span style="color:#4b5563">(llama3.1 · RAG)</span></h2>
+  <p style="font-size:9px;color:#4b5563;margin-bottom:10px">Traversal: {trav_html}</p>
+  {beats_html}
+</div>"""
+
+story_panel_html = _build_story_panel()
 
 # ── HTML template ─────────────────────────────────────────────────────────────
 
@@ -213,15 +281,7 @@ svg{width:100%;height:100%}
     <div class="lr"><div style="width:26px;border-top:2px dashed #a5b4fc;margin-top:5px;flex-shrink:0"></div><div><div class="lbl">wikilink</div><div class="desc">Dashed \u2014 <code style="color:#818cf8">[[wiki-link]]</code> from note body.</div></div></div>
     <div class="lr"><div style="width:26px;border-top:2px dotted #a5b4fc;margin-top:5px;flex-shrink:0"></div><div><div class="lbl">llm</div><div class="desc">Dotted \u2014 LLM-inferred relation.</div></div></div>
   </div>
-  <div class="panel">
-    <h2>Cross-Act Bridges <span style="color:#4b5563">(\u26a1 arc lines)</span></h2>
-    <p style="font-size:10px;color:#4b5563;margin-bottom:8px">Deliberate inter-community edges built by <code style="color:#818cf8">_build_cross_act_edges</code> during /analyze. Each bridge links a note to the best-matching neighbor in a foreign Kish\u014dtenketsu act, enabling the beat orchestrator to traverse ki\u2192sh\u014d\u2192ten\u2192ketsu.</p>
-    <div class="lr"><div style="width:26px;border-top:2px dashed #34d399;margin-top:5px;flex-shrink:0"></div><div><div class="lbl" style="color:#34d399">ki \u8d77 bridge</div><div class="desc">motivates (ki\u2192sh\u014d), contradicts (ki\u2194ten), supports (ki\u2192ketsu)</div></div></div>
-    <div class="lr"><div style="width:26px;border-top:2px dashed #60a5fa;margin-top:5px;flex-shrink:0"></div><div><div class="lbl" style="color:#60a5fa">sh\u014d \u627f bridge</div><div class="desc">potential_to (sh\u014d\u2192ten), supports (sh\u014d\u2194ki/ketsu)</div></div></div>
-    <div class="lr"><div style="width:26px;border-top:2px dashed #f59e0b;margin-top:5px;flex-shrink:0"></div><div><div class="lbl" style="color:#f59e0b">ten \u8ee2 bridge</div><div class="desc">kinetic_to (ten\u2192ketsu), contradicts (ten\u2194ki)</div></div></div>
-    <div class="lr"><div style="width:26px;border-top:2px dashed #c084fc;margin-top:5px;flex-shrink:0"></div><div><div class="lbl" style="color:#c084fc">ketsu \u7d50 bridge</div><div class="desc">supports (ketsu\u2192ki/sh\u014d)</div></div></div>
-    <p style="font-size:10px;color:#4b5563;margin-top:6px">Arc colour = <strong>target act</strong>. Toggle with the <em>Bridges</em> button. Click an arc to inspect its EdgeMatrix.</p>
-  </div>
+%%STORY_PANEL%%
   <div class="panel">
     <h2>Ketsu Signals <span style="color:#4b5563">(\u21e2 faint dashed)</span></h2>
     <p style="font-size:10px;color:#4b5563;margin-bottom:8px">Cross-community wikilinks originating from <strong>ki</strong> or <strong>ten</strong> nodes. These are the raw <code style="color:#818cf8">g.edges()</code> cross-boundary links that generate the <em>ketsu in-degree</em> score — the ketsu heuristic selects the node with the most incoming edges from ki+ten communities. Toggle with the <em>Ketsu signals</em> button.</p>
@@ -581,7 +641,7 @@ svg.call(zoom.transform,d3.zoomIdentity.translate(W/2,H/2));
 </body>
 </html>"""
 
-html = template.replace("%%DATA_JS%%", data_js)
+html = template.replace("%%DATA_JS%%", data_js).replace("%%STORY_PANEL%%", story_panel_html)
 out_path = ROOT / "edgematrix-viz.html"
 out_path.write_text(html, encoding="utf-8")
 print(f"Written {len(html):,} chars to {out_path}")
