@@ -77,9 +77,35 @@ export const AnalyzeResponseSchema = z.object({
 export type AnalyzeResponse = z.infer<typeof AnalyzeResponseSchema>;
 
 // ---------------------------------------------------------------------------
-// Validation helper — call at the Client-Server Bridge boundary
+// GenerateArcRequest — mirrors server.py GenerateArcRequest
+// ---------------------------------------------------------------------------
+
+export const GenerateArcRequestSchema = z.object({
+	locked_acts: z.array(z.string()).default([]),
+});
+export type GenerateArcRequest = z.infer<typeof GenerateArcRequestSchema>;
+
+// ---------------------------------------------------------------------------
+// GenerateArcResponse — mirrors server.py GenerateArcResponse
+// ---------------------------------------------------------------------------
+
+export const GenerateArcResponseSchema = z.object({
+	ki: z.string().default(""),
+	sho: z.string().default(""),
+	ten: z.string().default(""),
+	ketsu: z.string().default(""),
+	clusters_used: z.record(z.array(z.number().int())).default({}),
+});
+export type GenerateArcResponse = z.infer<typeof GenerateArcResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// Validation helpers — call at the Client-Server Bridge boundary
 // ---------------------------------------------------------------------------
 
 export function validateAnalyzeResponse(raw: unknown): AnalyzeResponse {
 	return AnalyzeResponseSchema.parse(raw);
+}
+
+export function validateGenerateArcResponse(raw: unknown): GenerateArcResponse {
+	return GenerateArcResponseSchema.parse(raw);
 }

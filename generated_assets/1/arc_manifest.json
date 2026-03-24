@@ -1,0 +1,44 @@
+{
+  "generated": "2026-03-24T00-24-47Z",
+  "health": {
+    "status": "ok",
+    "nodes": 197,
+    "edges": 1036,
+    "graph_persisted": true,
+    "smart_connections": {
+      "embeddings_loaded": 98,
+      "outlinks_loaded": 48
+    },
+    "bertopic_ready": true,
+    "ollama_alive": true
+  },
+  "arc": {
+    "ki": "As the virtual reality landscape of Neo-Eden, New York City's premier \"techno-utopia,\" pulsed with vibrant colors and digital life, Malaysian programmer Aisha Chen sat cross-legged in her Jeju Island-inspired studio, sipping a fragrant jasmine tea and contemplating the next phase of her AI-powered shamanic project. Meanwhile, on the other side of the world, British explorer Captain James Cook was about to set sail for the Malay Archipelago, unaware that his 1770 encounters with the Amok phenomenon would become the first recorded instances of this enigmatic and terrifying form of violent behavior.",
+    "sho": "As Aisha's tea-soaked fingers danced across the digital canvas of her AI-powered shamanic project, a disembodied voice whispered ancient Khmer prayers into her ear, echoing the mystical connections she sought to forge between cybernetic and organic life forms; meanwhile, on the horizon of Captain Cook's voyage, the faint scent of jasmine wafted from an unknown source, hinting at the convergence of cultures and identities that would forever alter the course of human history.",
+    "ten": "As Aisha's tea-cooled fingers danced across the keyboard, synchronizing her AI-powered spirit guides with the astral bodies of ancient Malaysian warriors, Captain Cook's expeditionary vessels were unwittingly being orchestrated by an unseen force that would disrupt the trajectory of both the shamanic project and the course of global history.",
+    "ketsu": "As Aisha's AI-powered shamanic project merged with Captain Cook's navigation charts, the digital landscape of Neo-Eden began to reveal its true nature as a manifestation of the Amok phenomenon, blurring the lines between human and machine; in this new reality, the boundaries between survivance and absence dissolved, allowing Aisha to integrate her Malaysian heritage into the code, while Captain Cook's expedition became an act of humility, embracing the Fool's space of no limits to forge a new trajectory for humanity."
+  },
+  "clusters_used": {
+    "ki": [
+      0
+    ],
+    "sho": [
+      4,
+      3,
+      5,
+      6
+    ],
+    "ten": [
+      2
+    ],
+    "ketsu": [
+      1
+    ]
+  },
+  "cluster_note_counts": {
+    "ki": 65,
+    "sho": 58,
+    "ten": 19,
+    "ketsu": 50
+  }
+}

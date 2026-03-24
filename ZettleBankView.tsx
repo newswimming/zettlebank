@@ -1,4 +1,4 @@
-import { useState, useCallback, type FC } from "react";
+import { useState, useCallback, useEffect, type FC } from "react";
 import type { ApprovedPayload } from "./main";
 import type {
 	AnalyzeResponse,
@@ -6,6 +6,7 @@ import type {
 	NarrativeMetadata,
 	RelationType,
 } from "./schema";
+import { validateGenerateArcResponse } from "./schema";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -36,6 +37,43 @@ const RELATION_COLORS: Record<RelationType, string> = {
 	hinders: "var(--text-error)",
 	related: "var(--text-muted)",
 };
+
+// ---------------------------------------------------------------------------
+// Narrative act configuration
+// ---------------------------------------------------------------------------
+
+const ACT_CONFIG = {
+	ki:    { label: "Ki",    kanji: "起", sub: "Introduction", color: "#34d399" },
+	sho:   { label: "Sho",   kanji: "承", sub: "Development",  color: "#60a5fa" },
+	ten:   { label: "Ten",   kanji: "転", sub: "Twist",        color: "#f59e0b" },
+	ketsu: { label: "Ketsu", kanji: "結", sub: "Resolution",   color: "#c084fc" },
+} as const;
+
+type Act = keyof typeof ACT_CONFIG;
+const ACTS: Act[] = ["ki", "sho", "ten", "ketsu"];
+
+// ---------------------------------------------------------------------------
+// useHealth — pings /health on mount, surfaces ollama_alive
+// ---------------------------------------------------------------------------
+
+function useHealth(): boolean {
+	const [ollamaAlive, setOllamaAlive] = useState(true);
+
+	useEffect(() => {
+		fetch("http://localhost:8000/health", {
+			signal: AbortSignal.timeout(4000),
+		})
+			.then((r) => r.json())
+			.then((d) => {
+				if (d.ollama_alive === false) setOllamaAlive(false);
+			})
+			.catch(() => {
+				// Server unreachable — leave enabled, generation will surface the error
+			});
+	}, []);
+
+	return ollamaAlive;
+}
 
 // ---------------------------------------------------------------------------
 // Tag Toggle Card
@@ -294,6 +332,176 @@ const StagingArea: FC<{
 };
 
 // ---------------------------------------------------------------------------
+// NarrativeArcPanel — 4-act beat generator
+// ---------------------------------------------------------------------------
+
+const NarrativeArcPanel: FC<{ ollamaAlive: boolean }> = ({ ollamaAlive }) => {
+	const [beats, setBeats] = useState<Record<Act, string>>({
+		ki: "", sho: "", ten: "", ketsu: "",
+	});
+	const [locked, setLocked] = useState<Record<Act, boolean>>({
+		ki: false, sho: false, ten: false, ketsu: false,
+	});
+	const [loading, setLoading] = useState(false);
+	const [error, setError] = useState<string | null>(null);
+
+	const toggleLock = (act: Act) => {
+		if (loading) return;
+		setLocked((prev) => ({ ...prev, [act]: !prev[act] }));
+	};
+
+	const generate = async () => {
+		if (!ollamaAlive || loading) return;
+		setLoading(true);
+		setError(null);
+
+		const locked_acts = ACTS.filter((a) => locked[a]);
+
+		try {
+			const resp = await fetch(
+				"http://localhost:8000/graph/generate-arc",
+				{
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ locked_acts }),
+					signal: AbortSignal.timeout(180_000),
+				}
+			);
+			if (!resp.ok) throw new Error(`Server error ${resp.status}`);
+			const data = validateGenerateArcResponse(await resp.json());
+
+			setBeats((prev) => ({
+				ki:    locked.ki    ? prev.ki    : data.ki    || prev.ki,
+				sho:   locked.sho   ? prev.sho   : data.sho   || prev.sho,
+				ten:   locked.ten   ? prev.ten   : data.ten   || prev.ten,
+				ketsu: locked.ketsu ? prev.ketsu : data.ketsu || prev.ketsu,
+			}));
+		} catch (e) {
+			setError(
+				e instanceof Error ? e.message : "Generation failed."
+			);
+		} finally {
+			setLoading(false);
+		}
+	};
+
+	return (
+		<div className="zettlebank-staging">
+			{ACTS.map((act) => {
+				const cfg = ACT_CONFIG[act];
+				const isLocked = locked[act];
+				const beat = beats[act];
+				const isPending = loading && !isLocked;
+
+				return (
+					<div
+						key={act}
+						className="zettlebank-card"
+						onClick={() => toggleLock(act)}
+						style={{
+							cursor: loading ? "default" : "pointer",
+							borderColor: isLocked ? cfg.color : undefined,
+							boxShadow: isLocked
+								? `0 0 0 1px ${cfg.color}55, inset 0 0 14px ${cfg.color}0d`
+								: undefined,
+							background: isLocked ? "#13161f" : undefined,
+							transition:
+								"border-color 0.18s, box-shadow 0.18s, background 0.18s",
+						}}
+					>
+						{/* Block header */}
+						<div
+							style={{
+								display: "flex",
+								alignItems: "center",
+								gap: "7px",
+								marginBottom: "6px",
+							}}
+						>
+							<span
+								style={{
+									width: 8,
+									height: 8,
+									borderRadius: "50%",
+									background: cfg.color,
+									flexShrink: 0,
+									display: "inline-block",
+								}}
+							/>
+							<span
+								style={{
+									flex: 1,
+									fontSize: "11px",
+									fontWeight: 700,
+									color: "var(--text-normal)",
+									letterSpacing: "0.02em",
+								}}
+							>
+								{cfg.label}{" "}
+								<span
+									style={{
+										color: "var(--text-faint)",
+										fontWeight: 400,
+									}}
+								>
+									{cfg.kanji} · {cfg.sub}
+								</span>
+							</span>
+							<span style={{ fontSize: "11px", opacity: 0.75 }}>
+								{isLocked ? "🔒" : "🔓"}
+							</span>
+						</div>
+
+						{/* Beat text */}
+						<p
+							style={{
+								fontSize: "11px",
+								lineHeight: 1.6,
+								margin: 0,
+								paddingLeft: "15px",
+								color: beat
+									? "var(--text-muted)"
+									: "var(--text-faint)",
+								fontStyle: beat ? "normal" : "italic",
+								opacity: isPending ? 0.4 : 1,
+								transition: "opacity 0.2s",
+							}}
+						>
+							{isPending
+								? "· · ·"
+								: beat || "Click generate to draft..."}
+						</p>
+					</div>
+				);
+			})}
+
+			{/* Error state */}
+			{error && (
+				<div
+					className="zettlebank-error"
+					style={{ marginBottom: "8px" }}
+				>
+					<p>{error}</p>
+				</div>
+			)}
+
+			{/* Generate button */}
+			<div className="zettlebank-actions">
+				<button
+					className="zettlebank-btn-approve"
+					onClick={generate}
+					disabled={!ollamaAlive || loading}
+					type="button"
+					style={{ width: "100%" }}
+				>
+					{loading ? "Drafting..." : "Generate Arc"}
+				</button>
+			</div>
+		</div>
+	);
+};
+
+// ---------------------------------------------------------------------------
 // Root sidebar component
 // ---------------------------------------------------------------------------
 
@@ -302,53 +510,141 @@ export const ZettleBankSidebar: FC<SidebarProps> = ({
 	onAnalyze,
 	onApprove,
 }) => {
+	const ollamaAlive = useHealth();
+	const [activeTab, setActiveTab] = useState<"analysis" | "arc">(
+		"analysis"
+	);
+
+	const tabStyle = (tab: "analysis" | "arc"): React.CSSProperties => ({
+		flex: 1,
+		padding: "8px 0",
+		background: "none",
+		border: "none",
+		borderBottom:
+			activeTab === tab
+				? "2px solid var(--interactive-accent)"
+				: "2px solid transparent",
+		color:
+			activeTab === tab
+				? "var(--text-normal)"
+				: "var(--text-faint)",
+		cursor: "pointer",
+		fontSize: "12px",
+		fontWeight: activeTab === tab ? 600 : 400,
+		transition: "color 0.15s, border-color 0.15s",
+	});
+
 	return (
 		<div className="zettlebank-container">
+			{/* Header */}
 			<div className="zettlebank-header">
 				<h3>ZettleBank</h3>
-				{state.phase !== "loading" && state.phase !== "staging" && (
-					<button
-						className="zettlebank-analyze-btn"
-						onClick={onAnalyze}
-						type="button"
-					>
-						Analyze
-					</button>
-				)}
+				{activeTab === "analysis" &&
+					state.phase !== "loading" &&
+					state.phase !== "staging" && (
+						<button
+							className="zettlebank-analyze-btn"
+							onClick={onAnalyze}
+							type="button"
+						>
+							Analyze
+						</button>
+					)}
 			</div>
 
-			{state.phase === "idle" && (
-				<div className="zettlebank-empty-state">
-					<p>
-						Select a note and click Analyze to extract narrative
-						metadata.
-					</p>
+			{/* Tab navigation */}
+			<div
+				style={{
+					display: "flex",
+					borderBottom:
+						"1px solid var(--background-modifier-border)",
+					padding: "0 12px",
+					flexShrink: 0,
+				}}
+			>
+				<button
+					type="button"
+					onClick={() => setActiveTab("analysis")}
+					style={tabStyle("analysis")}
+				>
+					Analysis
+				</button>
+				<button
+					type="button"
+					onClick={() => setActiveTab("arc")}
+					style={tabStyle("arc")}
+				>
+					Arc Generator
+				</button>
+			</div>
+
+			{/* Ollama offline warning */}
+			{!ollamaAlive && (
+				<div
+					style={{
+						margin: "8px 12px 0",
+						padding: "7px 9px",
+						background: "var(--background-modifier-error)",
+						border: "1px solid var(--text-error)",
+						borderRadius: "5px",
+						fontSize: "11px",
+						color: "var(--text-error)",
+						display: "flex",
+						gap: "5px",
+						alignItems: "flex-start",
+						lineHeight: 1.5,
+					}}
+				>
+					<span style={{ flexShrink: 0 }}>⚠️</span>
+					<span>
+						Ollama is offline. Arc generation is disabled.
+					</span>
 				</div>
 			)}
 
-			{state.phase === "loading" && (
-				<div className="zettlebank-loading">Analyzing note...</div>
+			{/* Tab content */}
+			{activeTab === "analysis" && (
+				<>
+					{state.phase === "idle" && (
+						<div className="zettlebank-empty-state">
+							<p>
+								Select a note and click Analyze to extract
+								narrative metadata.
+							</p>
+						</div>
+					)}
+
+					{state.phase === "loading" && (
+						<div className="zettlebank-loading">
+							Analyzing note...
+						</div>
+					)}
+
+					{state.phase === "error" && (
+						<div className="zettlebank-error">
+							<p>{state.message}</p>
+							<button
+								className="zettlebank-btn-secondary"
+								onClick={onAnalyze}
+								type="button"
+							>
+								Retry
+							</button>
+						</div>
+					)}
+
+					{state.phase === "staging" && (
+						<StagingArea
+							data={state.data}
+							onApprove={onApprove}
+							onReanalyze={onAnalyze}
+						/>
+					)}
+				</>
 			)}
 
-			{state.phase === "error" && (
-				<div className="zettlebank-error">
-					<p>{state.message}</p>
-					<button
-						className="zettlebank-btn-secondary"
-						onClick={onAnalyze}
-						type="button"
-					>
-						Retry
-					</button>
-				</div>
-			)}
-
-			{state.phase === "staging" && (
-				<StagingArea
-					data={state.data}
-					onApprove={onApprove}
-					onReanalyze={onAnalyze}
-				/>
+			{activeTab === "arc" && (
+				<NarrativeArcPanel ollamaAlive={ollamaAlive} />
 			)}
 		</div>
 	);

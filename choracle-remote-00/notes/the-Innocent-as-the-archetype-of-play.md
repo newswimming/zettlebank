@@ -1,0 +1,7 @@
+The word 'innocent' comes from the Latin 'innocens', meaning harmless, or being without blame. The Innocent is the archetypal mask of playfulness. In addition to the Iroquois tradition it's a mask that crops up in most cultures - Indian, African, Chinese - in some form or another and we see in it the various symbolic manifestations of 'The Monkey'
+
+To us, The Innocent is not unlike the Clown, except that The innocent isn't required to make us laugh .Working this mask is like working with an unruly puppy. The Innocent subverts everything, respects nothing and is devoted to 'finding the game'. It's Harpo Marx wrecking a room and tearing a piano apart. It's the beserk warrior running amok on the battlefield. It's the jealous psychopath beating his girlfriend to death. But it's also the mindless enthusiast in the antique shop, discovering new things, but destroying them all in the process.
+
+If you lift your eyebrows up as far as they can go, purse your lips, as if you were making a fruitless attempt to whistle, and make at 'Ooo' sound, you'll be copying the facial expression of The Innocent. Which is the perfect place to start a game, because the Innocent is the archetype of play
+
+[[wright-2017]]
