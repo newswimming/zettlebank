@@ -11,6 +11,8 @@ uses graph topology + neighbor data to propose tags and relations.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
+from datetime import datetime
 import json
 import logging
 import math
@@ -30,6 +32,7 @@ import networkx as nx
 import spacy
 from bertopic import BERTopic
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from leidenalg import find_partition, RBConfigurationVertexPartition
 from pydantic import BaseModel, Field
@@ -202,7 +205,16 @@ def _spacy_tokenizer(text: str) -> list[str]:
 # App & graph state
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="ZettleBank Intelligence Layer")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _load_graph()
+    await asyncio.to_thread(_load_smart_env)
+    await asyncio.to_thread(_load_pipeline_models)
+    yield
+    _save_graph()
+
+
+app = FastAPI(title="ZettleBank Intelligence Layer", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -1449,13 +1461,18 @@ def _run_stage_c_aspects(content: str) -> list[str]:
 
 
 async def _ollama_complete(prompt: str, model: str = OLLAMA_MODEL,
-                           json_mode: bool = True) -> dict | str:
+                           json_mode: bool = True,
+                           num_predict: int | None = None) -> dict | str:
     """Async Ollama HTTP call via httpx."""
     url = f"{OLLAMA_BASE_URL}/api/generate"
+    options: dict = {"temperature": 0.2, "top_p": 0.5}
+    if num_predict is not None:
+        options["num_predict"] = num_predict
     payload: dict = {
         "model": model,
         "prompt": prompt,
         "stream": False,
+        "options": options,
     }
     if json_mode:
         payload["format"] = "json"
@@ -1717,25 +1734,6 @@ def _extract_cluster_text(
         total += len(block)
 
     return "\n".join(parts)
-
-
-# ---------------------------------------------------------------------------
-# Lifecycle
-# ---------------------------------------------------------------------------
-
-
-@app.on_event("startup")
-async def on_startup():
-    _load_graph()
-    # L-1: offload synchronous I/O off the event loop.
-    await asyncio.to_thread(_load_smart_env)
-    # H-3: offload heavy transformer + BERTopic load off the event loop.
-    await asyncio.to_thread(_load_pipeline_models)
-
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    _save_graph()
 
 
 # ---------------------------------------------------------------------------
@@ -2078,6 +2076,10 @@ async def generate_arc(req: GenerateArcRequest):
 
     # ── Two-step LLM chain, sequential (ki → sho → ten → ketsu) ──────────────
     beats: dict[str, str] = {"ki": "", "sho": "", "ten": "", "ketsu": ""}
+    log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "generated_assets", "arc_generation_log.md")
+
+    with open(log_file, "a", encoding="utf-8") as _lf:
+        _lf.write(f"\n\n## Arc Generation Run - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
 
     for act in ("ki", "sho", "ten", "ketsu"):
         if act in locked:
@@ -2094,15 +2096,17 @@ async def generate_arc(req: GenerateArcRequest):
 
         char_str, place_str = _cluster_aspect_tags(cids)
 
-        # ── Step 1: Summarize cluster notes → 5 bullet-point key ideas ────────
+        # ── Step 1: Extract 5 specific details from cluster notes ────────────
         summarize_prompt = (
-            "Summarize the following notes from a knowledge vault into exactly 5 key ideas "
-            "as a bulleted list. Each bullet should be a concise phrase under 15 words. "
+            "You are an analytical researcher extracting concrete data from source material. "
+            "Extract exactly 5 highly specific details from the following notes. "
+            "Retain specific nouns, unique terminology, historical references, and direct concepts from the text. "
+            "Do not paraphrase into abstract ideas. "
             "Output ONLY the 5 bullet points, each starting with '- '. No preamble.\n\n"
             f"{cluster_text}\n\n"
-            "5 key ideas:"
+            "5 specific details:"
         )
-        summary_raw = await _ollama_complete(summarize_prompt, json_mode=False)
+        summary_raw = await _ollama_complete(summarize_prompt, json_mode=False, num_predict=120)
         summary = str(summary_raw).strip() if isinstance(summary_raw, str) else ""
         if not summary:
             logger.warning("generate_arc: empty summary for act=%s", act)
@@ -2113,64 +2117,93 @@ async def generate_arc(req: GenerateArcRequest):
         sho_ctx = beats["sho"] or "(sho beat not available)"
         ten_ctx = beats["ten"] or "(ten beat not available)"
 
+        constraints_block = (
+            "TONE & STYLE CONSTRAINTS:\n"
+            "- Write in a grounded, documentary, or objective style. "
+            "Avoid flowery language, dramatic metaphors, and purple prose. "
+            "Banned words and phrases include: 'tapestry', 'symphony', 'realm', "
+            "'whispers', 'echoes', 'dance', 'weave', 'shimmering', and similar ornamental language.\n"
+            "- You MUST use the exact nouns, concepts, and terminology from the Source Details below. "
+            "Do not invent external narrative elements, fictional organisations, or invented proper nouns "
+            "that are not present in the Source Details.\n"
+            "- Treat the provided Character aspects and Place aspects as literal, factual subjects "
+            "and locations for a case study, NOT as fictional protagonists or fantasy settings.\n"
+        )
+
         if act == "ki":
             draft_prompt = (
-                "You are writing a Kishōtenketsu narrative story beat.\n"
+                "You are writing a plot outline entry, not narrative prose.\n"
                 "Act: Ki (Introduction — establish the status quo, no conflict yet)\n\n"
-                "Key ideas from the source material:\n"
+                f"{constraints_block}\n"
+                "Source Details from the source material:\n"
                 f"{summary}\n\n"
                 f"Character aspects: {char_str}\n"
                 f"Place aspects: {place_str}\n\n"
-                "Write exactly 2 sentences for the Ki beat. "
-                "Use the character and place aspects to ascribe attributes and establish "
-                "who is present and where. Set up the exposition and status quo. "
+                "TASK: Write exactly 2 sentences for the Ki beat. "
+                "Each sentence must be under 20 words. No subordinate clauses, no 'as', no 'while', no 'who'. "
+                "Sentence 1: name the subject and their location. "
+                "Sentence 2: state what they are doing or working on. "
                 "Output only the 2 sentences — no labels, no explanation."
             )
         elif act == "sho":
             draft_prompt = (
-                "You are writing a Kishōtenketsu narrative story beat.\n"
-                "Act: Sho (Development — continue and elaborate on the Ki act)\n\n"
-                f"Ki beat (for narrative continuity):\n{ki_ctx}\n\n"
-                "Key ideas from the source material:\n"
+                "You are writing a plot outline entry, not narrative prose.\n"
+                "Act: Sho (Development — a new fact advances the situation from Ki)\n\n"
+                f"{constraints_block}\n"
+                f"Ki beat:\n{ki_ctx}\n\n"
+                "Source Details from the source material:\n"
                 f"{summary}\n\n"
                 f"Character aspects: {char_str}\n"
                 f"Place aspects: {place_str}\n\n"
-                "Write exactly 2 sentences for the Sho beat. "
-                "You may introduce a new character in addition to any character from the Ki beat — "
-                "they may or may not interact. Develop and deepen the narrative. "
+                "TASK: Write exactly 2 sentences for the Sho beat. "
+                "Each sentence must be under 20 words. No subordinate clauses, no 'as', no 'while', no 'who'. "
+                "Sentence 1: introduce a second named subject or a new concrete development. "
+                "Sentence 2: state how this connects to or extends the situation in Ki. "
                 "Output only the 2 sentences — no labels, no explanation."
             )
         elif act == "ten":
             draft_prompt = (
-                "You are writing a Kishōtenketsu narrative story beat.\n"
-                "Act: Ten (Twist/Pivot — an unexpected turn; a reframe, not a crisis)\n\n"
-                f"Ki beat (to contradict or diverge from):\n{ki_ctx}\n\n"
-                "Key ideas from the source material:\n"
+                "You are writing a plot outline entry, not narrative prose.\n"
+                "Act: Ten (Pivot — a plot-level event disrupts the status quo from Ki)\n\n"
+                f"{constraints_block}\n"
+                f"Ki beat:\n{ki_ctx}\n\n"
+                "Source Details from the source material:\n"
                 f"{summary}\n\n"
-                "Write exactly 2 sentences for the Ten beat. "
-                "You MUST explicitly contradict or diverge from the Ki beat — "
-                "introduce a juxtaposition or unexpected reframe. "
-                "This is not a conflict resolution; it is a pivot. "
+                "TASK: Write exactly 2 sentences for the Ten beat. "
+                "Each sentence must be under 20 words. No subordinate clauses, no 'as', no 'while', no 'who'. "
+                "Sentence 1: state the specific event or fact that disrupts Ki — name the agent and the action. "
+                "Sentence 2: state the immediate consequence or changed condition. "
                 "Output only the 2 sentences — no labels, no explanation."
             )
         else:  # ketsu
             draft_prompt = (
-                "You are writing a Kishōtenketsu narrative story beat.\n"
-                "Act: Ketsu (Resolution — synthesize Ki, Sho, and Ten)\n\n"
+                "You are writing a plot outline entry, not narrative prose.\n"
+                "Act: Ketsu (Resolution — state the new condition after the Ten pivot)\n\n"
+                f"{constraints_block}\n"
                 f"Ki beat: {ki_ctx}\n"
                 f"Sho beat: {sho_ctx}\n"
                 f"Ten beat: {ten_ctx}\n\n"
-                "Key ideas from the source material:\n"
+                "Source Details from the source material:\n"
                 f"{summary}\n\n"
-                "Write exactly 2 sentences for the Ketsu beat. "
-                "Resolve the narrative by synthesizing all three prior beats. "
-                "Recontextualize Ki and Sho through the lens of Ten to establish a new stable state. "
+                "TASK: Write exactly 2 sentences for the Ketsu beat. "
+                "Each sentence must be under 20 words. No subordinate clauses, no 'as', no 'while', no 'who'. "
+                "Sentence 1: state what has materially changed for the subjects from Ki and Sho. "
+                "Sentence 2: state the new stable condition or position they now occupy. "
                 "Output only the 2 sentences — no labels, no explanation."
             )
 
-        beat_raw = await _ollama_complete(draft_prompt, json_mode=False)
+        beat_raw = await _ollama_complete(draft_prompt, json_mode=False, num_predict=60)
         beats[act] = str(beat_raw).strip() if isinstance(beat_raw, str) else ""
         logger.info("generate_arc: act=%s  cids=%s  chars=%s", act, cids, char_str)
+
+        with open(log_file, "a", encoding="utf-8") as _lf:
+            _lf.write(f"\n### Act: {act.upper()}\n")
+            _lf.write(f"**Selected cluster IDs:** {cids}\n\n")
+            _lf.write("#### Step 1: Distilled Key Ideas\n")
+            _lf.write(f"{summary}\n\n")
+            _lf.write("#### Step 2: Final Drafted Beat\n")
+            _lf.write(f"{beats[act]}\n\n")
+            _lf.write("---\n")
 
     return GenerateArcResponse(
         ki=beats["ki"],
@@ -2179,3 +2212,47 @@ async def generate_arc(req: GenerateArcRequest):
         ketsu=beats["ketsu"],
         clusters_used=clusters_used,
     )
+
+
+def _sanitize(obj):
+    """Recursively replace non-finite floats (nan, inf) with None for JSON safety."""
+    if isinstance(obj, float):
+        return None if not math.isfinite(obj) else obj
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize(v) for v in obj]
+    return obj
+
+
+@app.get("/graph/export-hydrated")
+def export_hydrated():
+    """Return the full graph with runtime topology calculations pre-applied.
+
+    Runs macro Leiden community detection and constraint scoring live, then
+    decorates every node with ``macro_id`` and ``constraint`` so the frontend
+    can render the graph without any NetworkX logic in the browser.
+
+    Response shape::
+
+        {
+            "nodes": [{"id": str, "tags": [...], "macro_id": int, "constraint": float, ...}],
+            "links": [{"source": str, "target": str, <edge attrs>}]
+        }
+    """
+    macro, _, _, _ = _detect_multi_resolution()
+    constraint_map = _build_constraint_map()
+
+    nodes = []
+    for nid, data in graph.nodes(data=True):
+        node_dict = {"id": nid, **data}
+        node_dict["macro_id"] = macro.get(nid, -1)
+        node_dict["constraint"] = constraint_map.get(nid, 1.0)
+        nodes.append(node_dict)
+
+    links = [
+        {"source": u, "target": v, **data}
+        for u, v, data in graph.edges(data=True)
+    ]
+
+    return JSONResponse(content=_sanitize({"nodes": nodes, "links": links}))
