@@ -98,6 +98,9 @@ VAULT_NOTES_DIR = Path(__file__).parent / _VAULT_DIR / "notes"
 # BERTopic persistence path
 BERTOPIC_PATH = Path(__file__).parent / "bertopic_model"
 
+# Generated assets output directory
+GENERATED_ASSETS_DIR = Path(__file__).parent / "generated_assets"
+
 # Ollama settings
 OLLAMA_BASE_URL         = os.environ.get("OLLAMA_BASE_URL",         "http://localhost:11434")
 OLLAMA_MODEL            = os.environ.get("OLLAMA_MODEL",            "llama3.2")
@@ -1737,6 +1740,92 @@ def _extract_cluster_text(
 
 
 # ---------------------------------------------------------------------------
+# Arc generation cluster report
+# ---------------------------------------------------------------------------
+
+
+def _write_cluster_act_section(
+    report_path: Path,
+    act: str,
+    cids: list[int],
+    macro: dict[str, int],
+    constraint_map: dict[str, float],
+) -> None:
+    """Append a fully documented section for one act to the cluster report.
+
+    For each note in the act's clusters, writes:
+      - Note ID, macro community ID, constraint score
+      - All frontmatter metadata stored on the graph node
+      - A text excerpt from the vault file (up to 1500 chars)
+    """
+    cid_set = set(cids)
+    note_ids = [n for n, c in macro.items() if c in cid_set]
+
+    lines: list[str] = [
+        f"\n## Act: {act.upper()}",
+        f"**Cluster IDs:** {cids}  |  **Note count:** {len(note_ids)}\n",
+    ]
+
+    for nid in note_ids:
+        node_data = graph.nodes[nid] if nid in graph else {}
+        tags         = node_data.get("tags", [])
+        relations    = node_data.get("smart_relations", [])
+        community_id = node_data.get("community_id", None)
+        updated      = node_data.get("updated", None)
+        aliases      = node_data.get("aliases", None)
+        description  = node_data.get("description", None)
+        source       = node_data.get("source", None)
+        citation_id  = node_data.get("citationID", None)
+        macro_id     = macro.get(nid, -1)
+        constraint   = constraint_map.get(nid, None)
+        constraint_str = f"{constraint:.4f}" if isinstance(constraint, float) and math.isfinite(constraint) else "n/a"
+
+        excerpt = ""
+        note_path = VAULT_NOTES_DIR / f"{nid}.md"
+        if note_path.exists():
+            try:
+                raw = note_path.read_text(encoding="utf-8", errors="replace")
+                excerpt = _strip_frontmatter(raw)[:1500].strip()
+            except OSError:
+                pass
+
+        lines += [
+            f"### {nid}",
+            f"- **Macro community:** {macro_id}",
+            f"- **Graph community_id:** {community_id}",
+            f"- **Constraint score:** {constraint_str}",
+            f"- **Aliases:** {aliases}",
+            f"- **Description:** {description}",
+            f"- **Source:** {source}",
+            f"- **CitationID:** {citation_id}",
+            f"- **Last updated:** {updated}",
+            f"- **Tags:** {', '.join(tags) if tags else 'none'}",
+        ]
+
+        if relations:
+            lines.append("- **Smart relations:**")
+            for rel in relations:
+                if isinstance(rel, dict):
+                    lines.append(
+                        f"  - `{rel.get('link', '?')}` — {rel.get('type', '?')} "
+                        f"(confidence: {rel.get('confidence', '?')})"
+                    )
+        else:
+            lines.append("- **Smart relations:** none")
+
+        lines += [
+            "- **Excerpt:**",
+            f"  > {excerpt[:600].replace(chr(10), ' ') if excerpt else '*(no text)*'}",
+            "",
+        ]
+
+    lines.append("---")
+
+    with open(report_path, "a", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
@@ -2076,7 +2165,16 @@ async def generate_arc(req: GenerateArcRequest):
 
     # ── Two-step LLM chain, sequential (ki → sho → ten → ketsu) ──────────────
     beats: dict[str, str] = {"ki": "", "sho": "", "ten": "", "ketsu": ""}
+    run_ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "generated_assets", "arc_generation_log.md")
+
+    GENERATED_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+    report_path = GENERATED_ASSETS_DIR / f"cluster_report_{run_ts}.md"
+    with open(report_path, "w", encoding="utf-8") as _rf:
+        _rf.write(f"# Cluster Report — Arc Generation Run\n")
+        _rf.write(f"**Timestamp:** {run_ts.replace('_', ' ')}\n")
+        _rf.write(f"**Locked acts:** {sorted(locked) or 'none'}\n")
+        _rf.write(f"**Clusters selected:** {selected_cids}\n")
 
     with open(log_file, "a", encoding="utf-8") as _lf:
         _lf.write(f"\n\n## Arc Generation Run - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -2195,6 +2293,8 @@ async def generate_arc(req: GenerateArcRequest):
         beat_raw = await _ollama_complete(draft_prompt, json_mode=False, num_predict=60)
         beats[act] = str(beat_raw).strip() if isinstance(beat_raw, str) else ""
         logger.info("generate_arc: act=%s  cids=%s  chars=%s", act, cids, char_str)
+
+        _write_cluster_act_section(report_path, act, cids, macro, constraint_map)
 
         with open(log_file, "a", encoding="utf-8") as _lf:
             _lf.write(f"\n### Act: {act.upper()}\n")
