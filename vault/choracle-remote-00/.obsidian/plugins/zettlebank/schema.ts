@@ -132,6 +132,7 @@ export const GenerateArcResponseSchema = z.object({
 	ten:          z.string().default(""),
 	ketsu:        z.string().default(""),
 	clusters_used: z.record(z.string(), z.array(z.number().int())).default({}),
+	characters_per_act: z.record(z.string(), z.array(z.string())).default({}),
 });
 export type GenerateArcResponse = z.infer<typeof GenerateArcResponseSchema>;
 

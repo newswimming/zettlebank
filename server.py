@@ -44,6 +44,189 @@ import igraph as ig
 logger = logging.getLogger("zettlebank")
 
 # ---------------------------------------------------------------------------
+# CSG → ZettleBank translation helpers
+# ---------------------------------------------------------------------------
+
+_CSG_TO_RELATION: dict[str, str] = {
+    # Affiliative → supports
+    "ROMANTIC":       "supports",
+    "FRIEND":         "supports",
+    "ALLY":           "supports",
+    "COAUTHOR":       "supports",
+    # Kinship (neutral, no directional force) → related
+    "FAMILY":         "related",
+    # Shared latent capacity → potential_to
+    "COCONSPIRATOR":  "potential_to",
+    # Hierarchy driving behaviour → motivates
+    "BOSS_OF":        "motivates",
+    "TEACHER_OF":     "motivates",
+    # Constraint on agency → hinders
+    "SUBORDINATE_OF": "hinders",
+    "STUDENT_OF":     "hinders",
+    "OWES_DEBT":      "hinders",
+    "BLACKMAILS":     "hinders",
+    # Opposition → contradicts
+    "RIVAL":          "contradicts",
+    "ENEMY":          "contradicts",
+    # Active directed force (pivot-quality events) → kinetic_to
+    "BETRAYAL":       "kinetic_to",
+    "PROTECTS":       "kinetic_to",
+    # Fallback
+    "UNKNOWN":        "related",
+}
+
+
+def _scene_to_act(scene_id: str, total_scenes: int) -> "NarrativeActEnum":
+    """Map a SCENE_NNN id to a Kishōtenketsu act by temporal position.
+
+    Divides the script into four equal quarters:
+      0–24%   → ki    (introduction)
+      25–49%  → sho   (development)
+      50–74%  → ten   (pivot)
+      75–100% → ketsu (resolution)
+
+    Falls back to NarrativeActEnum.ki on any parse failure.
+    """
+    try:
+        idx = int(scene_id.split("_")[-1])
+    except (ValueError, IndexError):
+        return NarrativeActEnum.ki
+    pct = idx / max(total_scenes, 1)
+    if pct < 0.25:
+        return NarrativeActEnum.ki
+    if pct < 0.50:
+        return NarrativeActEnum.sho
+    if pct < 0.75:
+        return NarrativeActEnum.ten
+    return NarrativeActEnum.ketsu
+
+
+def _scene_to_beat(scene_id: str, total_scenes: int) -> str:
+    """Map scene temporal position to the opening beat code of its act.
+
+    Returns one of the 16-beat BEAT_CODES values (CLAUDE.md Rule 2).
+    Uses the subject-emergence / engagement / pivot / synthesis beats as
+    act openers — these are the most neutral introductory beats for each act.
+
+      ki    → ki-2   (subject emergence)
+      sho   → sho-5  (engagement)
+      ten   → ten-9  (pivot / unexpected turn)
+      ketsu → ketsu-13 (synthesis)
+    """
+    act = _scene_to_act(scene_id, total_scenes)
+    return {
+        NarrativeActEnum.ki:    "ki-2",
+        NarrativeActEnum.sho:   "sho-5",
+        NarrativeActEnum.ten:   "ten-9",
+        NarrativeActEnum.ketsu: "ketsu-13",
+    }[act]
+
+
+def _aggregate_sentiment(sentiments: list[str]) -> str:
+    """Majority-vote over CSG interaction sentiment values → affect/ tag value.
+
+    CSG values: positive | neutral | negative | mixed
+    Zettlebank values: positive | negative | mu
+
+    neutral and mixed both map to mu.
+    Returns mu on empty input or tie.
+    """
+    if not sentiments:
+        return "mu"
+    pos = sum(1 for s in sentiments if s == "positive")
+    neg = sum(1 for s in sentiments if s == "negative")
+    if pos > neg:
+        return "positive"
+    if neg > pos:
+        return "negative"
+    return "mu"
+
+
+def _aggregate_power_role(power_values: list[str]) -> str:
+    """Majority-vote over CSG interaction power_dynamics → power_role attribute.
+
+    Returns the most common non-'unclear' value, or 'unclear' on tie or
+    empty input. Used to set the power_role node attribute at ingest, which
+    informs character role assignment in _assign_character_role.
+    """
+    if not power_values:
+        return "unclear"
+    counts: Counter[str] = Counter(v for v in power_values if v != "unclear")
+    if not counts:
+        return "unclear"
+    return counts.most_common(1)[0][0]
+
+
+def _assign_character_role(
+    canon_name: str,
+    power_role: str,
+    agg_sentiment: str,
+    outbound_interactions: "list[CSGInteraction]",
+    src_relations: "list[CSGRelation]",
+    pivot_names: "set[str]",
+    char_scene_ids: "set[str]",
+    place_time_scene_ids: "set[str]",
+) -> str:
+    """Assign a narrative archetype to a character from CSG interaction patterns.
+
+    Priority order (first match wins): locus > symbiote > mirror > dominant > neutral
+
+    locus:    Ambient authority whose presence is constitutive of the world.
+              Signals: is src in BOSS_OF/TEACHER_OF relation AND scene overlap
+              with place_time_scene_ids AND non-negative aggregate sentiment.
+              Locus characters govern the conditions characters live within;
+              they do not fight the world, they are part of it.
+
+    symbiote: Submissive character who attaches to a dominant and redirects
+              their choices from a position of apparent compliance.
+              Signals: power_role=submissive AND agg_sentiment in positive/mu
+              AND (repeated interaction ≥2 with same target, OR in pivot_names).
+              Pure submissive-negative is oppression, not symbiosis.
+
+    mirror:   Character whose presence maps the environmental place/time.
+              Signals: scene overlap with place_time_scene_ids AND power_role
+              in peer/unclear AND not in pivot_names.
+
+    dominant: Interpersonally dominant without environmental or symbiotic
+              pattern. Lowest Ki weight — dominance asserts hierarchy inside
+              the world but does not establish the world itself.
+
+    neutral:  Fallback for insufficient signal.
+    """
+    has_place_time_overlap = bool(char_scene_ids & place_time_scene_ids)
+    is_authority_src = any(
+        r.rel_type in ("BOSS_OF", "TEACHER_OF") for r in src_relations
+    )
+
+    # ── Locus ────────────────────────────────────────────────────────────────
+    if is_authority_src and has_place_time_overlap and agg_sentiment != "negative":
+        return "locus"
+
+    # ── Symbiote ─────────────────────────────────────────────────────────────
+    if power_role == "submissive" and agg_sentiment in ("positive", "mu"):
+        target_counts: Counter[str] = Counter(i.dst for i in outbound_interactions)
+        repeated_attachment = (
+            bool(target_counts) and target_counts.most_common(1)[0][1] >= 2
+        )
+        if repeated_attachment or canon_name in pivot_names:
+            return "symbiote"
+
+    # ── Mirror ───────────────────────────────────────────────────────────────
+    if (
+        has_place_time_overlap
+        and power_role in ("peer", "unclear")
+        and canon_name not in pivot_names
+    ):
+        return "mirror"
+
+    # ── Dominant ─────────────────────────────────────────────────────────────
+    if power_role == "dominant":
+        return "dominant"
+
+    return "neutral"
+
+
+# ---------------------------------------------------------------------------
 # Constants – Controlled vocabularies from architecture.md
 # ---------------------------------------------------------------------------
 
@@ -102,9 +285,15 @@ BERTOPIC_PATH = Path(__file__).parent / "bertopic_model"
 GENERATED_ASSETS_DIR = Path(__file__).parent / "generated_assets"
 
 # Ollama settings
-OLLAMA_BASE_URL         = os.environ.get("OLLAMA_BASE_URL",         "http://localhost:11434")
-OLLAMA_MODEL            = os.environ.get("OLLAMA_MODEL",            "llama3.2")
-NARRATIVE_AUDITOR_MODEL = os.environ.get("NARRATIVE_AUDITOR_MODEL", "llama3.1")
+OLLAMA_BASE_URL         = os.environ.get("OLLAMA_BASE_URL",  "http://localhost:11434")
+OLLAMA_MODEL            = os.environ.get("OLLAMA_MODEL",     "llama3.2")
+# Default auditor to the same model as OLLAMA_MODEL to avoid Ollama unloading
+# and reloading between calls.  Set NARRATIVE_AUDITOR_MODEL explicitly in .env
+# only if you have enough VRAM to keep two models resident simultaneously.
+NARRATIVE_AUDITOR_MODEL = os.environ.get("NARRATIVE_AUDITOR_MODEL", OLLAMA_MODEL)
+# Context window passed to Ollama options.  2048 covers all prompts in this
+# pipeline and roughly halves KV-cache VRAM vs the llama3.2 default of 8192.
+OLLAMA_NUM_CTX          = int(os.environ.get("OLLAMA_NUM_CTX", "2048"))
 
 # H-1: Guard against SSRF via OLLAMA_BASE_URL.
 _parsed_ollama = urlparse(OLLAMA_BASE_URL)
@@ -208,12 +397,40 @@ def _spacy_tokenizer(text: str) -> list[str]:
 # App & graph state
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Shared async resources — initialised in lifespan, used across all requests
+# ---------------------------------------------------------------------------
+
+# Serialise all Ollama calls through a single semaphore.
+# A local GPU runs one model at a time; firing two concurrent requests only
+# queues them inside Ollama while doubling KV-cache pressure.  Serialising
+# here gives full throughput to each call and prevents OOM on limited VRAM.
+#
+# Initialised here (safe in Python 3.10+ — no event loop required at
+# construction) so _ollama_complete is callable even if lifespan hasn't run
+# yet (e.g. during test setup).  Lifespan replaces this with a fresh instance.
+_OLLAMA_SEM: asyncio.Semaphore = asyncio.Semaphore(1)
+
+# Persistent httpx client — initialised in lifespan so it is bound to the
+# correct event loop.  Type annotation only here; accessing before lifespan
+# would raise AttributeError which is intentional (fast fail on misconfiguration).
+_HTTP_CLIENT: httpx_client.AsyncClient
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _OLLAMA_SEM, _HTTP_CLIENT
+    _OLLAMA_SEM = asyncio.Semaphore(1)
+    _HTTP_CLIENT = httpx_client.AsyncClient(
+        timeout=90.0,
+        follow_redirects=False,
+        limits=httpx_client.Limits(max_connections=4, max_keepalive_connections=2),
+    )
     _load_graph()
     await asyncio.to_thread(_load_smart_env)
     await asyncio.to_thread(_load_pipeline_models)
     yield
+    await _HTTP_CLIENT.aclose()
     _save_graph()
 
 
@@ -347,6 +564,129 @@ class IngestItem(BaseModel):
     content: str = Field(default="", max_length=_CONTENT_MAX)
 
 
+class CSGCharacter(BaseModel):
+    """One character entry from a Character-Social-Graph pipeline run.
+
+    Mirrors the 'characters' list in the CSG per-scene JSON output.
+    canon_name is the authoritative name used as the slug source.
+    """
+    canon_name: str = Field(..., min_length=1, max_length=128,
+        description="Authoritative character name from CSG extraction.")
+    aliases: list[str] = Field(
+        default_factory=list,
+        description="Alternate names or short forms recognised in the screenplay.")
+    first_appearance_scene: Optional[str] = Field(
+        default=None,
+        description="Scene ID of first appearance (e.g. 'SCENE_003').")
+    description: Optional[str] = Field(
+        default=None,
+        description="Optional one-line character description from CSG.")
+
+
+class CSGRelation(BaseModel):
+    """One directed social relation extracted by the CSG pipeline.
+
+    rel_type uses the CSG controlled vocabulary (ROMANTIC, OWES_DEBT, etc.).
+    It is translated to zettlebank RelationType at ingest time.
+    """
+    src: str = Field(..., min_length=1,
+        description="Source character canon_name.")
+    dst: str = Field(..., min_length=1,
+        description="Target character canon_name.")
+    rel_type: str = Field(...,
+        description="CSG relation type (ROMANTIC, BOSS_OF, OWES_DEBT, etc.).")
+    scene_id: str = Field(...,
+        description="Scene where this relation was first observed.")
+    evidence: str = Field(default="",
+        description="Verbatim text snippet from the screenplay that supports this relation.")
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0,
+        description="Extraction confidence from the CSG LLM pass (0–1).")
+    since_scene: Optional[str] = Field(default=None,
+        description="Scene ID when the relation began (from CSG temporal field).")
+    until_scene: Optional[str] = Field(default=None,
+        description="Scene ID when the relation ended, if applicable.")
+
+
+class CSGInteraction(BaseModel):
+    """One directed interaction instance extracted by the CSG pipeline.
+
+    Carries sentiment and power_dynamics per interaction, used to derive
+    aggregate affect/ tags and power_role node attributes at ingest time.
+    """
+    src: str = Field(..., min_length=1,
+        description="Source character canon_name.")
+    dst: str = Field(..., min_length=1,
+        description="Target character canon_name.")
+    scene_id: str = Field(...,
+        description="Scene where this interaction occurred.")
+    sentiment: str = Field(default="neutral",
+        description="Interaction sentiment: positive | neutral | negative | mixed.")
+    power_dynamics: str = Field(default="unclear",
+        description="Power relation: dominant | submissive | peer | unclear.")
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0,
+        description="Extraction confidence from the CSG LLM pass (0–1).")
+
+
+class CSGTurningPoint(BaseModel):
+    """One scene-level turning point extracted by the CSG pipeline.
+
+    Characters listed in 'who' receive is_narrative_pivot=True at ingest,
+    which boosts their community's Ten-act score in _assign_macro_acts.
+    """
+    scene_id: str = Field(...,
+        description="Scene where this turning point occurs.")
+    who: list[str] = Field(
+        default_factory=list,
+        description="Canon names of characters present in this turning point.")
+    description: str = Field(default="",
+        description="Text description of the turning point from CSG scene_summary.")
+
+
+class CharacterGraphIngestRequest(BaseModel):
+    """Request body for POST /graph/ingest-character-graph.
+
+    Carries structured output from a CSG pipeline run. The total_scenes
+    count is required for temporal scene→act mapping. All translation from
+    CSG vocabulary to zettlebank EdgeMatrix vocabulary happens server-side.
+    """
+    total_scenes: int = Field(..., ge=1,
+        description="Total number of scenes in the source script. "
+                    "Used as denominator for scene-index-to-act mapping.")
+    characters: list[CSGCharacter] = Field(
+        default_factory=list,
+        description="All characters extracted by the CSG pipeline.")
+    relations: list[CSGRelation] = Field(
+        default_factory=list,
+        description="All directed social relations extracted by the CSG pipeline.")
+    interactions: list[CSGInteraction] = Field(
+        default_factory=list,
+        description="All directed interaction instances extracted by the CSG pipeline.")
+    turning_points: list[CSGTurningPoint] = Field(
+        default_factory=list,
+        description="Scene-level turning points from CSG scene_summary fields.")
+    overwrite_existing_files: bool = Field(
+        default=False,
+        description="If False, skip writing .md files that already exist in VAULT_NOTES_DIR.")
+    place_time_scene_ids: list[str] = Field(
+        default_factory=list,
+        description="Scene IDs where scene_summary.where or scene_summary.when was non-null. "
+                    "Used to detect mirror and locus character archetypes during ingest.")
+
+
+class CharacterGraphIngestResponse(BaseModel):
+    """Response body for POST /graph/ingest-character-graph.
+
+    Mirrors the shape of the existing ingest endpoint response,
+    with additional per-character tracking fields.
+    """
+    characters_imported: int
+    relations_imported: int
+    files_written: list[str]
+    files_skipped: list[str]
+    nodes: int
+    edges: int
+
+
 class CommunityTier(BaseModel):
     """One resolution tier of the Leiden partition."""
     resolution: float
@@ -428,6 +768,12 @@ class GenerateArcResponse(BaseModel):
     clusters_used: dict[str, list[int]] = Field(
         default_factory=dict,
         description="Community IDs used per act (act_name -> list of community_ids).",
+    )
+    characters_per_act: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Confirmed character node slugs driving each act "
+                    "(act_name -> list of slugs). Empty list if no character "
+                    "nodes were found in that act's communities.",
     )
 
 
@@ -727,6 +1073,70 @@ def _run_leiden(
     return {reverse[idx]: mem for idx, mem in enumerate(partition.membership)}
 
 
+def _nx_to_igraph_subgraph(
+    subgraph: nx.DiGraph,
+) -> tuple[ig.Graph, dict[int, str]]:
+    """Convert an arbitrary NetworkX DiGraph to igraph for Leiden.
+
+    Mirror of _nx_to_igraph() but accepts any DiGraph instead of the
+    global graph, allowing character-scoped community detection without
+    polluting the full vault Leiden run.
+    """
+    mapping = {node: idx for idx, node in enumerate(subgraph.nodes())}
+    reverse = {idx: node for node, idx in mapping.items()}
+
+    ig_graph = ig.Graph(directed=True)
+    ig_graph.add_vertices(len(mapping))
+    ig_graph.vs["name"] = list(mapping.keys())
+
+    edges = [(mapping[u], mapping[v]) for u, v in subgraph.edges()]
+    weights = [subgraph[u][v].get("weight", 1.0) for u, v in subgraph.edges()]
+
+    if edges:
+        ig_graph.add_edges(edges)
+        ig_graph.es["weight"] = weights
+
+    return ig_graph, reverse
+
+
+def _run_leiden_subgraph(
+    subgraph: nx.DiGraph,
+    resolution: float,
+) -> dict[str, int]:
+    """Run Leiden on a subgraph and return node → community_id.
+
+    Used for character-scoped clustering so that regular vault notes do
+    not dilute character community structure.  Returns empty dict if the
+    subgraph has fewer than 2 nodes.
+    """
+    if subgraph.number_of_nodes() < 2:
+        return {}
+    ig_graph, reverse = _nx_to_igraph_subgraph(subgraph)
+    return _run_leiden(ig_graph, reverse, resolution)
+
+
+def _build_character_subgraph() -> nx.DiGraph:
+    """Return a subgraph containing only character-relevant nodes and edges.
+
+    Included node types:
+    - Nodes with is_character_node=True  (CSG-ingested characters)
+    - Vault notes that carry at least one aspect/character/ tag
+      (notes where spaCy NER or the LLM identified a character mention)
+
+    All edges between these nodes are preserved.  Regular vault notes
+    that have no character tag are excluded so that thematic clustering
+    of the portfolio narrative does not pollute character community
+    detection.
+    """
+    char_nodes: set[str] = set()
+    for nid, data in graph.nodes(data=True):
+        if data.get("is_character_node"):
+            char_nodes.add(nid)
+        elif any(t.startswith("aspect/character/") for t in data.get("tags", [])):
+            char_nodes.add(nid)
+    return graph.subgraph(char_nodes).copy()
+
+
 def _community_label(community_id: int, membership: dict[str, int]) -> str:
     """Derive a human-readable label for a community.
 
@@ -894,7 +1304,10 @@ def _assign_macro_acts(
         if not nodes:
             return 0.0
         bridge_count = sum(
-            1 for n in nodes if constraint_map.get(n, 1.0) < TEN_CONSTRAINT_THRESHOLD
+            1 for n in nodes
+            if constraint_map.get(n, 1.0) < TEN_CONSTRAINT_THRESHOLD
+            or graph.nodes[n].get("is_narrative_pivot", False)
+            or graph.nodes[n].get("character_role") == "symbiote"
         )
         return bridge_count / len(nodes)
 
@@ -915,8 +1328,31 @@ def _assign_macro_acts(
             )
             for n in nodes
         )
+        # character_role-based scoring:
+        # locus:    ambient authority constitutive of the world → strong Ki signal
+        # mirror:   maps the world's conditions → moderate Ki signal
+        # dominant: operates within the world but doesn't define it → weak Ki signal
+        # symbiote: develops through Sho-act attachment → slight Ki penalty
+        locus_boost = sum(
+            0.9 for n in nodes
+            if graph.nodes[n].get("character_role") == "locus"
+        )
+        mirror_boost = sum(
+            0.5 for n in nodes
+            if graph.nodes[n].get("character_role") == "mirror"
+        )
+        dominant_boost = sum(
+            0.2 for n in nodes
+            if graph.nodes[n].get("character_role") == "dominant"
+        )
+        symbiote_penalty = sum(
+            0.3 for n in nodes
+            if graph.nodes[n].get("character_role") == "symbiote"
+        )
         mean_outdeg = sum(g.out_degree(n) for n in nodes) / len(nodes)
-        return tag_count / (mean_outdeg + 1.0)
+        return (
+            tag_count + locus_boost + mirror_boost + dominant_boost - symbiote_penalty
+        ) / (mean_outdeg + 1.0)
 
     remaining = [c for c in community_ids if c not in assigned]
     if remaining:
@@ -1222,8 +1658,15 @@ def _load_pipeline_models() -> None:
     _fit_bertopic_on_vault()
 
 
-def _fit_bertopic_on_vault() -> None:
-    """Fit BERTopic on all vault .md files. Safe for small/empty vaults.
+def _fit_bertopic_on_vault(char_only: bool = False) -> None:
+    """Fit BERTopic on vault .md files.  Safe for small/empty vaults.
+
+    char_only=False (default): fit on every .md in the vault — used after
+        bulk /graph/ingest so the full portfolio narrative is represented.
+    char_only=True: restrict the corpus to character nodes and vault notes
+        that carry at least one aspect/character/ tag.  Used after
+        /graph/ingest-character-graph so character topic extraction is not
+        diluted by unrelated portfolio notes.
 
     Improvements applied:
     - Frontmatter stripped before fitting so YAML schema words don't pollute
@@ -1240,10 +1683,17 @@ def _fit_bertopic_on_vault() -> None:
     """
     global _bertopic_model, _bertopic_ready, _note_topics
 
+    # When char_only, restrict to stems present in the character subgraph.
+    char_stem_filter: set[str] | None = None
+    if char_only:
+        char_stem_filter = set(_build_character_subgraph().nodes())
+
     docs: list[str] = []
     stems: list[str] = []
     if VAULT_NOTES_DIR.exists():
-        for md in sorted(VAULT_NOTES_DIR.glob("*.md")):
+        for md in sorted(VAULT_NOTES_DIR.parent.rglob("*.md")):
+            if char_stem_filter is not None and md.stem not in char_stem_filter:
+                continue
             raw = md.read_text(encoding="utf-8", errors="replace").strip()
             if raw:
                 docs.append(_strip_frontmatter(raw))
@@ -1466,9 +1916,19 @@ def _run_stage_c_aspects(content: str) -> list[str]:
 async def _ollama_complete(prompt: str, model: str = OLLAMA_MODEL,
                            json_mode: bool = True,
                            num_predict: int | None = None) -> dict | str:
-    """Async Ollama HTTP call via httpx."""
+    """Async Ollama HTTP call.
+
+    Serialised through _OLLAMA_SEM so only one call runs at a time on the
+    local GPU.  Uses the module-level _HTTP_CLIENT for connection keep-alive.
+    num_ctx is injected from OLLAMA_NUM_CTX (default 2048) to cap KV-cache
+    VRAM without changing model quality for the short prompts used here.
+    """
     url = f"{OLLAMA_BASE_URL}/api/generate"
-    options: dict = {"temperature": 0.2, "top_p": 0.5}
+    options: dict = {
+        "temperature": 0.2,
+        "top_p": 0.5,
+        "num_ctx": OLLAMA_NUM_CTX,
+    }
     if num_predict is not None:
         options["num_predict"] = num_predict
     payload: dict = {
@@ -1480,9 +1940,8 @@ async def _ollama_complete(prompt: str, model: str = OLLAMA_MODEL,
     if json_mode:
         payload["format"] = "json"
 
-    # H-1: follow_redirects=False prevents redirect-based SSRF chaining.
-    async with httpx_client.AsyncClient(timeout=60.0, follow_redirects=False) as client:
-        resp = await client.post(url, json=payload)
+    async with _OLLAMA_SEM:
+        resp = await _HTTP_CLIENT.post(url, json=payload)
         resp.raise_for_status()
         body = resp.json()
         raw = body.get("response", "")
@@ -1685,6 +2144,29 @@ def _select_sho_clusters(
     return selected
 
 
+def _find_note_path(nid: str) -> "Path | None":
+    """Resolve a note ID to its .md file path.
+
+    Resolution order:
+      1. VAULT_NOTES_DIR / "{nid}.md"   (canonical location for ingest stubs)
+      2. Any .md file named "{nid}.md" within depth ≤ 3 of VAULT_NOTES_DIR.parent
+         (covers human-authored files in named sub-vault directories, e.g.
+          dayfly-angel-island/characters/yasuda-kitano.md)
+
+    Returns None if no matching file is found.
+    """
+    direct = VAULT_NOTES_DIR / f"{nid}.md"
+    if direct.exists():
+        return direct
+    target = f"{nid}.md"
+    vault_root = VAULT_NOTES_DIR.parent
+    for md_file in vault_root.rglob(target):
+        rel_parts = md_file.relative_to(vault_root).parts
+        if len(rel_parts) <= 3:
+            return md_file
+    return None
+
+
 def _extract_cluster_text(
     cids: list[int],
     macro_membership: dict[str, int],
@@ -1711,9 +2193,9 @@ def _extract_cluster_text(
         tags = graph.nodes[nid].get("tags", []) if nid in graph else []
         display_tags = [t for t in tags if t.startswith("aspect/") or t.startswith("topic/")]
 
-        note_path = VAULT_NOTES_DIR / f"{nid}.md"
+        note_path = _find_note_path(nid)
         excerpt = ""
-        if note_path.exists():
+        if note_path is not None:
             try:
                 raw = note_path.read_text(encoding="utf-8", errors="replace")
                 excerpt = _strip_frontmatter(raw)[:1500].strip()
@@ -1781,8 +2263,8 @@ def _write_cluster_act_section(
         constraint_str = f"{constraint:.4f}" if isinstance(constraint, float) and math.isfinite(constraint) else "n/a"
 
         excerpt = ""
-        note_path = VAULT_NOTES_DIR / f"{nid}.md"
-        if note_path.exists():
+        note_path = _find_note_path(nid)
+        if note_path is not None:
             try:
                 raw = note_path.read_text(encoding="utf-8", errors="replace")
                 excerpt = _strip_frontmatter(raw)[:1500].strip()
@@ -1905,7 +2387,11 @@ async def analyze(req: AnalyzeRequest):
     _upsert_edges(req.note_id, relations)
     _upsert_wikilink_edges(req.note_id, wikilinks)
     _save_graph()
-    macro, micro, macro_labels, micro_labels = _detect_multi_resolution()
+    # Leiden is CPU-bound; offload to a thread so the event loop stays
+    # responsive to other requests while the graph partition runs.
+    macro, micro, macro_labels, micro_labels = await asyncio.to_thread(
+        _detect_multi_resolution
+    )
 
     macro_id = macro.get(req.note_id)
     micro_id  = micro.get(req.note_id)
@@ -2093,6 +2579,308 @@ async def ingest_vault(notes: list[IngestItem]):
     }
 
 
+@app.post("/graph/ingest-character-graph", response_model=CharacterGraphIngestResponse)
+async def ingest_character_graph(req: CharacterGraphIngestRequest):
+    """Ingest a Character-Social-Graph pipeline run into the vault graph.
+
+    Translates CSG relation types to EdgeMatrix vocabulary, maps scene
+    temporal position to Kishōtenketsu narrative_act, pre-seeds affect/
+    and code/ tags from CSG sentiment and first_appearance_scene, and
+    writes stub .md files to VAULT_NOTES_DIR so _extract_cluster_text
+    can include character text in arc generation.
+
+    No LLM calls are made. This endpoint is purely structural.
+    BERTopic is refit after ingest so new character content enters the topic model.
+    Call /analyze on any vault note after this endpoint to trigger Leiden
+    re-partitioning with the new character nodes included.
+    """
+    files_written: list[str] = []
+    files_skipped: list[str] = []
+
+    # ── Build per-character lookup tables from interaction data ──────────────
+    # char_sentiments: canon_name → list of sentiment strings (src or dst)
+    # char_power:      canon_name → list of power_dynamics strings (src or dst)
+    char_sentiments: dict[str, list[str]] = {}
+    char_power: dict[str, list[str]] = {}
+    for iact in req.interactions:
+        for participant in (iact.src, iact.dst):
+            char_sentiments.setdefault(participant, []).append(iact.sentiment)
+            char_power.setdefault(participant, []).append(iact.power_dynamics)
+
+    # Scenes each character appears in (for mirror/locus detection)
+    char_scene_ids: dict[str, set[str]] = {}
+    for iact in req.interactions:
+        for participant in (iact.src, iact.dst):
+            char_scene_ids.setdefault(participant, set()).add(iact.scene_id)
+    for rel in req.relations:
+        for participant in (rel.src, rel.dst):
+            char_scene_ids.setdefault(participant, set()).add(rel.scene_id)
+
+    # Outbound interactions and src-side relations per character (for symbiote/locus)
+    char_outbound: dict[str, list[CSGInteraction]] = {}
+    char_src_rels: dict[str, list[CSGRelation]] = {}
+    for iact in req.interactions:
+        char_outbound.setdefault(iact.src, []).append(iact)
+    for rel in req.relations:
+        char_src_rels.setdefault(rel.src, []).append(rel)
+
+    place_time_set: set[str] = set(req.place_time_scene_ids)
+
+    # ── Build pivot set: characters present in any turning point ─────────────
+    pivot_names: set[str] = {
+        name
+        for tp in req.turning_points
+        for name in tp.who
+    }
+
+    # ── Process each character ───────────────────────────────────────────────
+    for char in req.characters:
+        note_id = _slugify(char.canon_name)
+        if not note_id:
+            logger.warning("ingest_character_graph: could not slugify %r, skipping", char.canon_name)
+            continue
+
+        # Derive tags
+        tags: list[str] = [f"aspect/character/{note_id}"]
+        for alias in char.aliases:
+            alias_slug = _slugify(alias)
+            if alias_slug and alias_slug != note_id and f"aspect/character/{alias_slug}" not in tags:
+                tags.append(f"aspect/character/{alias_slug}")
+
+        affect = _aggregate_sentiment(char_sentiments.get(char.canon_name, []))
+        tags.append(f"affect/{affect}")
+
+        if char.first_appearance_scene:
+            beat = _scene_to_beat(char.first_appearance_scene, req.total_scenes)
+        else:
+            beat = "ki-2"
+        tags.append(f"code/{beat}")
+
+        # Derive node attributes from CSG data
+        power_role = _aggregate_power_role(char_power.get(char.canon_name, []))
+        is_pivot = char.canon_name in pivot_names
+        agg_sentiment_val = _aggregate_sentiment(char_sentiments.get(char.canon_name, []))
+        character_role = _assign_character_role(
+            canon_name=char.canon_name,
+            power_role=power_role,
+            agg_sentiment=agg_sentiment_val,
+            outbound_interactions=char_outbound.get(char.canon_name, []),
+            src_relations=char_src_rels.get(char.canon_name, []),
+            pivot_names=pivot_names,
+            char_scene_ids=char_scene_ids.get(char.canon_name, set()),
+            place_time_scene_ids=place_time_set,
+        )
+
+        # Screenplay-derived metrics (computed from ingest data; no LLM needed)
+        scenes_for_char = char_scene_ids.get(char.canon_name, set())
+        attention_score = len(scenes_for_char) / req.total_scenes if req.total_scenes else 0.0
+
+        all_power = char_power.get(char.canon_name, [])
+        agency_score = all_power.count("dominant") / len(all_power) if all_power else 0.0
+
+        outbound_list = char_outbound.get(char.canon_name, [])
+        inbound_count = sum(
+            1 for iact in req.interactions if iact.dst == char.canon_name
+        )
+        total_interactions = len(outbound_list) + inbound_count
+        dialogue_weight = len(outbound_list) / total_interactions if total_interactions else 0.5
+
+        # Upsert node into graph
+        _upsert_node(note_id, {
+            "tags": tags,
+            "is_character_node": True,
+            "is_narrative_pivot": is_pivot,
+            "power_role": power_role,
+            "character_role": character_role,
+            "csg_canon_name": char.canon_name,
+            "attention_score": round(attention_score, 4),
+            "agency_score": round(agency_score, 4),
+            "dialogue_weight": round(dialogue_weight, 4),
+        })
+        _store_node_tags(note_id, tags)
+
+        # Write .md stub to VAULT_NOTES_DIR
+        note_path = VAULT_NOTES_DIR / f"{note_id}.md"
+        if note_path.exists() and not req.overwrite_existing_files:
+            files_skipped.append(note_id)
+            logger.info("ingest_character_graph: skipping existing file %s", note_id)
+        else:
+            # Build relation lines for this character
+            rel_lines = ", ".join(
+                f"{r.rel_type} with {r.dst}"
+                for r in req.relations
+                if r.src == char.canon_name
+            ) or "none documented"
+
+            # Build interaction lines (deduplicated by dst, capped at 5)
+            seen_dsts: set[str] = set()
+            inter_parts: list[str] = []
+            for iact in req.interactions:
+                if iact.src == char.canon_name and iact.dst not in seen_dsts:
+                    inter_parts.append(
+                        f"{iact.dst} ({iact.sentiment}, {iact.power_dynamics})"
+                    )
+                    seen_dsts.add(iact.dst)
+                    if len(inter_parts) >= 5:
+                        break
+            inter_lines = ", ".join(inter_parts) or "none documented"
+
+            tag_yaml = "\n".join(f"  - {t}" for t in tags)
+            appearance_note = (
+                f" introduced in {char.first_appearance_scene}"
+                if char.first_appearance_scene else ""
+            )
+            description_block = char.description.strip() if char.description else ""
+
+            content = (
+                f"---\n"
+                f"tags:\n{tag_yaml}\n"
+                f"smart_relations: []\n"
+                f"community_id: null\n"
+                f"is_character_node: true\n"
+                f"updated: {datetime.now().isoformat()}\n"
+                f"---\n\n"
+                f"{char.canon_name} is a character{appearance_note}.\n\n"
+                f"{description_block + chr(10) + chr(10) if description_block else ''}"
+                f"Relations: {rel_lines}\n\n"
+                f"Interactions: {inter_lines}\n"
+            )
+
+            VAULT_NOTES_DIR.mkdir(parents=True, exist_ok=True)
+            note_path.write_text(content.strip(), encoding="utf-8")
+            files_written.append(note_id)
+            logger.info(
+                "ingest_character_graph: wrote %s (pivot=%s, power=%s)",
+                note_id, is_pivot, power_role,
+            )
+
+    # ── Process relations → EdgeMatrix edges ────────────────────────────────
+    for rel in req.relations:
+        src_id = _slugify(rel.src)
+        dst_id = _slugify(rel.dst)
+        if not src_id or not dst_id or src_id == dst_id:
+            continue
+        # Ensure both endpoints exist as nodes (may not be in req.characters
+        # if the character appeared only as a relation target)
+        if src_id not in graph:
+            _upsert_node(src_id, {"is_character_node": True, "csg_canon_name": rel.src})
+        if dst_id not in graph:
+            _upsert_node(dst_id, {"is_character_node": True, "csg_canon_name": rel.dst})
+
+        rel_type_str = _CSG_TO_RELATION.get(rel.rel_type.upper(), "related")
+        narrative_act = _scene_to_act(rel.scene_id, req.total_scenes)
+
+        edge = EdgeMatrix(
+            target_id=dst_id,
+            relation_type=RelationType(rel_type_str),
+            narrative_act=NarrativeActEnum(narrative_act.value),
+            confidence=round(min(rel.confidence, 1.0), 3),
+            provenance=ProvenanceEnum.wikilink,
+        )
+        _upsert_edges(src_id, [edge])
+
+    # ── Cross-reference existing vault notes ────────────────────────────────
+    # For every character just ingested, scan the vault graph for notes that
+    # already carry an aspect/character/<slug> tag (written by spaCy NER
+    # during /analyze calls).  Add a directed `related` edge from each such
+    # note to the character node so that the character subgraph captures
+    # zettlebank-native context alongside the CSG screenplay data.
+    #
+    # We also patch the character node's beat code if a vault note provides a
+    # more specific code/ tag than the default ki-2 assigned from
+    # first_appearance_scene: the most common code/ tag across mentioning notes
+    # wins.  This propagates the portfolio narrative position of a character
+    # (as observed in the Obsidian vault) into the character node itself.
+    vault_refs_total = 0
+    for char in req.characters:
+        note_id = _slugify(char.canon_name)
+        if not note_id or note_id not in graph:
+            continue
+        char_tag = f"aspect/character/{note_id}"
+        beat_votes: Counter[str] = Counter()
+        for nid, ndata in list(graph.nodes(data=True)):
+            if nid == note_id or ndata.get("is_character_node"):
+                continue
+            if char_tag not in ndata.get("tags", []):
+                continue
+            # Determine narrative_act from the mentioning note's code/ tag
+            note_act = NarrativeActEnum.ki
+            for tag in ndata.get("tags", []):
+                if tag.startswith("code/"):
+                    beat_slug = tag[5:]  # strip "code/"
+                    act_from_beat = _scene_to_act(
+                        f"SCENE_{beat_slug.split('-')[-1]}", 16
+                    )
+                    note_act = act_from_beat
+                    beat_votes[beat_slug] += 1
+                    break
+            vault_edge = EdgeMatrix(
+                target_id=note_id,
+                relation_type=RelationType.related,
+                narrative_act=note_act,
+                confidence=0.7,
+                provenance=ProvenanceEnum.wikilink,
+            )
+            _upsert_edges(nid, [vault_edge])
+            vault_refs_total += 1
+        # Patch character node beat code if vault evidence overrides CSG default
+        if beat_votes:
+            dominant_beat = beat_votes.most_common(1)[0][0]
+            existing_tags: list[str] = list(graph.nodes[note_id].get("tags", []))
+            patched = [t for t in existing_tags if not t.startswith("code/")]
+            patched.append(f"code/{dominant_beat}")
+            _store_node_tags(note_id, patched)
+
+    if vault_refs_total:
+        logger.info(
+            "ingest_character_graph: linked %d vault-note → character edges "
+            "from existing zettlebank graph",
+            vault_refs_total,
+        )
+
+    _save_graph()
+    logger.info(
+        "ingest_character_graph: complete — chars=%d, relations=%d, "
+        "files_written=%d, files_skipped=%d, nodes=%d, edges=%d",
+        len(req.characters), len(req.relations),
+        len(files_written), len(files_skipped),
+        graph.number_of_nodes(), graph.number_of_edges(),
+    )
+
+    # ── Character-scoped Leiden ──────────────────────────────────────────────
+    # Run Leiden on the character subgraph only (character nodes + vault notes
+    # that tag a character).  This detects character communities without the
+    # noise of unrelated portfolio notes and stores character_community_id on
+    # each node so generate-arc can surface character groupings independently
+    # of the full-vault macro partition.
+    char_sub = _build_character_subgraph()
+    char_communities = _run_leiden_subgraph(char_sub, RESOLUTION_MACRO)
+    if char_communities:
+        for nid, cid in char_communities.items():
+            if nid in graph:
+                graph.nodes[nid]["character_community_id"] = cid
+        _save_graph()
+        logger.info(
+            "ingest_character_graph: character subgraph Leiden — "
+            "%d nodes → %d communities",
+            len(char_communities),
+            len(set(char_communities.values())),
+        )
+
+    # Refit BERTopic scoped to character-relevant docs so that character topic
+    # extraction is not diluted by unrelated portfolio notes.
+    await asyncio.to_thread(_fit_bertopic_on_vault, True)
+
+    return CharacterGraphIngestResponse(
+        characters_imported=len(req.characters),
+        relations_imported=len(req.relations),
+        files_written=files_written,
+        files_skipped=files_skipped,
+        nodes=graph.number_of_nodes(),
+        edges=graph.number_of_edges(),
+    )
+
+
 @app.post("/graph/generate-arc", response_model=GenerateArcResponse)
 async def generate_arc(req: GenerateArcRequest):
     """Generate a 4-act Kishōtenketsu narrative arc from vault communities.
@@ -2145,25 +2933,47 @@ async def generate_arc(req: GenerateArcRequest):
 
     # ── Helper: collect aspect tags for a set of community IDs ────────────────
     def _cluster_aspect_tags(cids: list[int]) -> tuple[str, str]:
-        """Return (character_str, place_str) from stored graph node tags."""
-        chars: list[str] = []
+        """Return (character_str, place_str) from stored graph node tags.
+
+        Confirmed character nodes (is_character_node=True, where the node id
+        matches at least one aspect/character/ tag leaf) are listed before
+        NER-extracted character mentions so that actual story characters are
+        not displaced by generic NER tokens like 'photographs' or 'japanese'.
+        """
+        confirmed_chars: list[str] = []
+        inferred_chars: list[str] = []
         places: list[str] = []
         cid_set = set(cids)
         for nid, c in macro.items():
             if c not in cid_set or nid not in graph:
                 continue
-            for tag in graph.nodes[nid].get("tags", []):
+            node_data = graph.nodes[nid]
+            is_char_node = node_data.get("is_character_node", False)
+            for tag in node_data.get("tags", []):
                 if tag.startswith("aspect/character/"):
                     entity = tag.split("/")[-1]
-                    if entity not in chars:
-                        chars.append(entity)
+                    if is_char_node and entity == nid:
+                        if entity not in confirmed_chars:
+                            confirmed_chars.append(entity)
+                    else:
+                        if entity not in inferred_chars:
+                            inferred_chars.append(entity)
                 elif tag.startswith("aspect/place/"):
                     entity = tag.split("/")[-1]
                     if entity not in places:
                         places.append(entity)
+        # Only include NER-inferred character slugs that correspond to an actual
+        # character node so that spaCy false-positives (e.g. "remastered-30th-
+        # anniversary-edition") are excluded from the arc's characters_per_act.
+        char_node_ids = {
+            nid for nid, d in graph.nodes(data=True) if d.get("is_character_node")
+        }
+        filtered_inferred = [e for e in inferred_chars if e in char_node_ids]
+        chars = confirmed_chars + [e for e in filtered_inferred if e not in confirmed_chars]
         return (", ".join(chars[:5]) or "none", ", ".join(places[:5]) or "none")
 
     # ── Two-step LLM chain, sequential (ki → sho → ten → ketsu) ──────────────
+    chars_by_act: dict[str, list[str]] = {}
     beats: dict[str, str] = {"ki": "", "sho": "", "ten": "", "ketsu": ""}
     run_ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "generated_assets", "arc_generation_log.md")
@@ -2193,6 +3003,10 @@ async def generate_arc(req: GenerateArcRequest):
             continue
 
         char_str, place_str = _cluster_aspect_tags(cids)
+        chars_by_act[act] = [
+            c.strip() for c in char_str.split(",")
+            if c.strip() and c.strip() != "none"
+        ]
 
         # ── Step 1: Extract 5 specific details from cluster notes ────────────
         summarize_prompt = (
@@ -2311,6 +3125,7 @@ async def generate_arc(req: GenerateArcRequest):
         ten=beats["ten"],
         ketsu=beats["ketsu"],
         clusters_used=clusters_used,
+        characters_per_act=chars_by_act,
     )
 
 
@@ -2348,6 +3163,12 @@ def export_hydrated():
         node_dict = {"id": nid, **data}
         node_dict["macro_id"] = macro.get(nid, -1)
         node_dict["constraint"] = constraint_map.get(nid, 1.0)
+        # Expose human-readable label: csg_canon_name → display_name
+        # Normalise underscores/hyphens to spaces and title-case the result so
+        # "KI_WOO" and "ki-woo" both render as "Ki Woo" in the frontend.
+        csg_name = data.get("csg_canon_name")
+        raw = csg_name if csg_name else nid
+        node_dict["display_name"] = raw.replace("_", " ").replace("-", " ").title()
         nodes.append(node_dict)
 
     links = [
