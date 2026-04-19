@@ -43,12 +43,12 @@ const RELATION_COLORS: Record<RelationType, string> = {
 const ACT_LABELS: Record<string, { label: string; kanji: string }> = {
 	ki:    { label: "Act 1: Ki · Introduction",  kanji: "起" },
 	sho:   { label: "Act 2: Shō · Development",  kanji: "承" },
-	ten:   { label: "Act 3: Ten · Pivot",         kanji: "転" },
-	ketsu: { label: "Act 4: Ketsu · Resolution", kanji: "結" },
+	ten:   { label: "Act 3: Ten · Pivot",         kanji: "轉" },
+	ketsu: { label: "Act 4: Ketsu · Resolution", kanji: "合" },
 };
 
 const ACT_SHORT: Record<string, string> = {
-	ki: "起", sho: "承", ten: "転", ketsu: "結",
+	ki: "起", sho: "承", ten: "轉", ketsu: "合",
 };
 
 const ACT_ORDER: Record<string, number> = { ki: 1, sho: 2, ten: 3, ketsu: 4 };
@@ -66,8 +66,8 @@ const PROVENANCE_LABEL: Record<string, string> = {
 const ARC_CFG = {
 	ki:    { label: "Ki",    kanji: "起", sub: "Introduction", color: "#34d399" },
 	sho:   { label: "Sho",   kanji: "承", sub: "Development",  color: "#60a5fa" },
-	ten:   { label: "Ten",   kanji: "転", sub: "Twist",        color: "#f59e0b" },
-	ketsu: { label: "Ketsu", kanji: "結", sub: "Resolution",   color: "#c084fc" },
+	ten:   { label: "Ten",   kanji: "轉", sub: "Twist",        color: "#f59e0b" },
+	ketsu: { label: "Ketsu", kanji: "合", sub: "Resolution",   color: "#c084fc" },
 } as const;
 
 type ArcAct = keyof typeof ARC_CFG;
@@ -220,7 +220,7 @@ const PivotAnalysisCard: FC<{
 	return (
 		<div className="zettlebank-card" style={{ borderColor: "var(--text-accent)", borderWidth: "1px" }}>
 			<h4 className="zettlebank-card-label" style={{ color: "var(--text-accent)" }}>
-				転 Pivot Analysis
+				轉 Pivot Analysis
 			</h4>
 
 			{/* Pivot freedom bar */}
@@ -255,7 +255,7 @@ const PivotAnalysisCard: FC<{
 				<div className="zettlebank-structural-row">
 					<span className="zettlebank-structural-key">Beat Position</span>
 					<span className="zettlebank-structural-val" style={{ fontFamily: "var(--font-monospace)" }}>
-						code/{audit.beat_position}
+						{audit.beat_position}
 					</span>
 				</div>
 			)}
@@ -327,7 +327,7 @@ const TagToggle: FC<{ value: string; accepted: boolean; onToggle: () => void }> 
 );
 
 // ---------------------------------------------------------------------------
-// Tag Group Card  (topic/, aspect/, code/ — affect/ handled by ValenceBadge)
+// Tag Group Card  (topic/, character/, place/, time/, object/ — affect/ handled by ValenceBadge selector)
 // ---------------------------------------------------------------------------
 
 const TagGroupCard: FC<{
@@ -365,10 +365,8 @@ const RelationCard: FC<{
 	rel: EdgeMatrix;
 	currentAct: string;
 	accepted: boolean;
-	editedTargetId: string;
 	onToggle: () => void;
-	onTargetChange: (next: string) => void;
-}> = ({ rel, currentAct, accepted, editedTargetId, onToggle, onTargetChange }) => {
+}> = ({ rel, currentAct, accepted, onToggle }) => {
 	const momentum    = getMomentumVector(currentAct, rel.narrative_act);
 	const fromShort   = ACT_SHORT[currentAct]        ?? currentAct;
 	const toShort     = ACT_SHORT[rel.narrative_act] ?? rel.narrative_act;
@@ -430,15 +428,6 @@ const RelationCard: FC<{
 				<span style={{ color: "var(--text-faint)" }}>({momentum.label})</span>
 			</div>
 
-			{/* Row 4: editable target_id */}
-			<input
-				className="zettlebank-relation-link-input"
-				type="text"
-				value={editedTargetId}
-				onChange={(e) => onTargetChange(e.target.value)}
-				placeholder="Target note id"
-				onClick={(e) => e.stopPropagation()}
-			/>
 		</div>
 	);
 };
@@ -496,6 +485,9 @@ const ActMapPanel: FC<{ data: AnalyzeResponse | null }> = ({ data }) => {
 	const freedom = Math.max(0, 1 - data.structural_hole.constraint_score);
 	const freedomPct = (freedom * 100).toFixed(1);
 
+	// act_weights from backend (soft distribution across 4 acts)
+	const weights = data.act_weights ?? { ki: 0.25, sho: 0.25, ten: 0.25, ketsu: 0.25 };
+
 	// Count smart_relations by target narrative_act
 	const relsByAct: Record<string, number> = {};
 	for (const rel of data.metadata.smart_relations) {
@@ -507,24 +499,72 @@ const ActMapPanel: FC<{ data: AnalyzeResponse | null }> = ({ data }) => {
 	return (
 		<div className="zettlebank-staging">
 
-			{/* 1. Act position hero */}
-			<div
-				className="zettlebank-card"
-				style={{
-					textAlign: "center",
-					borderColor: cfg.color,
-					background: `${cfg.color}10`,
-					padding: "16px 12px",
-				}}
-			>
-				<div style={{ fontSize: "52px", lineHeight: 1.0, marginBottom: "6px" }}>
-					{cfg.kanji}
+			{/* 1. Weighted act position card */}
+			<div className="zettlebank-card" style={{ borderColor: cfg.color }}>
+				<div style={{ display: "flex", justifyContent: "space-between", marginBottom: "6px" }}>
+					<h4 className="zettlebank-card-label" style={{ margin: 0 }}>Act Position</h4>
+					<span style={{ fontSize: "11px", color: "var(--text-faint)" }}>
+						Community {data.community_id !== null ? `#${data.community_id}` : "—"}
+					</span>
 				</div>
-				<div style={{ color: cfg.color, fontWeight: 700, fontSize: "13px", letterSpacing: "0.03em" }}>
-					{cfg.label} · {cfg.sub}
+				{/* Weighted 4-band bar */}
+				<div style={{
+					display: "flex", height: "28px", borderRadius: "var(--radius-s)",
+					overflow: "hidden", marginBottom: "8px",
+				}}>
+					{ARC_ACTS.map((a) => {
+						const w = weights[a] ?? 0;
+						const c = ARC_CFG[a];
+						const isDom = a === act;
+						return (
+							<div
+								key={a}
+								title={`${c.label} (${c.sub}): ${(w * 100).toFixed(1)}%`}
+								style={{
+									flex: w > 0 ? w : 0.01,
+									background: isDom ? c.color : `${c.color}60`,
+									display: "flex", alignItems: "center", justifyContent: "center",
+									minWidth: w > 0.05 ? 24 : 0,
+									transition: "flex 0.4s ease",
+								}}
+							>
+								{w > 0.12 && (
+									<span style={{
+										fontSize: isDom ? "15px" : "12px",
+										lineHeight: 1,
+										filter: isDom ? "none" : "opacity(0.7)",
+										pointerEvents: "none",
+									}}>
+										{c.kanji}
+									</span>
+								)}
+							</div>
+						);
+					})}
 				</div>
-				<div style={{ color: "var(--text-faint)", fontSize: "11px", marginTop: "4px" }}>
-					Community {data.community_id !== null ? `#${data.community_id}` : "—"}
+				{/* Legend */}
+				<div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+					{ARC_ACTS.map((a) => {
+						const w = weights[a] ?? 0;
+						const c = ARC_CFG[a];
+						const isDom = a === act;
+						return (
+							<span key={a} style={{
+								display: "flex", alignItems: "center", gap: "4px",
+								fontSize: "11px", fontWeight: isDom ? 700 : 400,
+							}}>
+								<span style={{
+									width: "7px", height: "7px", borderRadius: "50%",
+									background: c.color, display: "inline-block",
+									outline: isDom ? `2px solid ${c.color}` : "none",
+									outlineOffset: "1px",
+								}} />
+								<span style={{ color: isDom ? "var(--text-normal)" : "var(--text-muted)" }}>
+									{c.kanji} {(w * 100).toFixed(0)}%
+								</span>
+							</span>
+						);
+					})}
 				</div>
 			</div>
 
@@ -541,7 +581,7 @@ const ActMapPanel: FC<{ data: AnalyzeResponse | null }> = ({ data }) => {
 							: "var(--text-muted)",
 					}}>
 						{freedomPct}% free
-						{data.structural_hole.is_ten_candidate && " · 転 candidate"}
+						{data.structural_hole.is_ten_candidate && " · 轉 candidate"}
 					</span>
 				</div>
 				<div style={{
@@ -680,11 +720,15 @@ const ResultsPanel: React.FC<{
 	onApprove: (payload: ApprovedPayload) => Promise<void>;
 }> = ({ data, onApprove }) => {
 
-	// ── Affect ───────────────────────────────────────────────────────────
-	const initialAffect = (
-		data.metadata.tags.find((t) => t.startsWith("affect/")) ?? "affect/neutral"
-	).slice("affect/".length);
-	const [affect, setAffect] = useState(initialAffect);
+	// ── Affect (multi-select: 1–3 values) ────────────────────────────────
+	const initialAffects = new Set(
+		data.metadata.tags
+			.filter((t) => t.startsWith("affect/"))
+			.map((t) => t.slice("affect/".length))
+			.filter((v) => v in VALENCE_STYLES)
+	);
+	if (initialAffects.size === 0) initialAffects.add("neutral");
+	const [affects, setAffects] = useState<Set<string>>(initialAffects);
 
 	// ── Tags (non-affect) — all accepted by default ───────────────────────
 	const nonAffectTags = data.metadata.tags.filter((t) => !t.startsWith("affect/"));
@@ -692,20 +736,10 @@ const ResultsPanel: React.FC<{
 		() => new Set(nonAffectTags)
 	);
 
-	// ── Description ───────────────────────────────────────────────────────
-	const [description, setDescription] = useState(data.metadata.description ?? "");
-
 	// ── Relations keyed by target_id::relation_type ───────────────────────
 	const [relAccepted, setRelAccepted] = useState<Set<string>>(
 		() => new Set(data.metadata.smart_relations.map((r) => `${r.target_id}::${r.relation_type}`))
 	);
-	const [relTargets, setRelTargets] = useState<Map<string, string>>(() => {
-		const m = new Map<string, string>();
-		for (const r of data.metadata.smart_relations) {
-			m.set(`${r.target_id}::${r.relation_type}`, r.target_id);
-		}
-		return m;
-	});
 
 	// ── Community members ─────────────────────────────────────────────────
 	const [communityMembers, setCommunityMembers] = useState<string[] | null>(null);
@@ -744,31 +778,23 @@ const ResultsPanel: React.FC<{
 		setSaved(false);
 	};
 
-	const setRelTarget = (key: string, next: string) => {
-		setRelTargets((prev) => new Map(prev).set(key, next));
-		setSaved(false);
-	};
-
 	const handleApprove = async () => {
 		setApproving(true);
 		try {
 			const approvedTags = nonAffectTags
 				.filter((t) => acceptedTags.has(t))
-				.concat([`affect/${affect}`]);
+				.concat(Array.from(affects).map((v) => `affect/${v}`));
 
 			const approvedRels = data.metadata.smart_relations
 				.filter((r) => relAccepted.has(`${r.target_id}::${r.relation_type}`))
-				.map((r) => ({
-					...r,
-					target_id: relTargets.get(`${r.target_id}::${r.relation_type}`) ?? r.target_id,
-				}));
+;
 
 			await onApprove({
 				metadata: {
 					...data.metadata,
 					tags:            approvedTags,
 					smart_relations: approvedRels,
-					description:     description.trim() || null,
+					description:     data.metadata.description,
 				},
 				community_id: data.community_id,
 			});
@@ -786,14 +812,28 @@ const ResultsPanel: React.FC<{
 			{/* ── Emotional Valence selector ─────────────────────────── */}
 			<div className="zettlebank-card">
 				<h4 className="zettlebank-card-label">Emotional Valence</h4>
-				<div style={{ display: "flex", flexWrap: "wrap", gap: "4px", marginTop: "6px" }}>
+				<div style={{ fontSize: "10px", color: "var(--text-faint)", marginBottom: "4px" }}>
+					Select 1–3 tones
+				</div>
+				<div style={{ display: "flex", flexWrap: "wrap", gap: "4px" }}>
 					{Object.entries(VALENCE_STYLES).map(([key, vs]) => {
-						const active = affect === key;
+						const active = affects.has(key);
 						return (
 							<button
 								key={key}
 								type="button"
-								onClick={() => { setAffect(key); setSaved(false); }}
+								onClick={() => {
+									setAffects((prev) => {
+										const next = new Set(prev);
+										if (next.has(key)) {
+											if (next.size > 1) next.delete(key);
+										} else {
+											if (next.size < 3) next.add(key);
+										}
+										return next;
+									});
+									setSaved(false);
+								}}
 								style={{
 									padding: "2px 10px",
 									borderRadius: "var(--radius-s)",
@@ -813,11 +853,6 @@ const ResultsPanel: React.FC<{
 				</div>
 			</div>
 
-			{/* ── Description ───────────────────────────────────────── */}
-			<DescriptionCard
-				value={description}
-				onChange={(v) => { setDescription(v); setSaved(false); }}
-			/>
 
 			{/* ── Community members ─────────────────────────────────── */}
 			<div className="zettlebank-card">
@@ -882,9 +917,7 @@ const ResultsPanel: React.FC<{
 									rel={rel}
 									currentAct={data.narrative_act}
 									accepted={relAccepted.has(key)}
-									editedTargetId={relTargets.get(key) ?? rel.target_id}
 									onToggle={() => toggleRel(key)}
-									onTargetChange={(next) => setRelTarget(key, next)}
 								/>
 							);
 						})}

@@ -760,6 +760,10 @@ class AnalyzeResponse(BaseModel):
         default="sho",
         description="Macro-act assignment for this note's community: ki, sho, ten, or ketsu.",
     )
+    act_weights: dict[str, float] = Field(
+        default_factory=lambda: {"ki": 0.25, "sho": 0.25, "ten": 0.25, "ketsu": 0.25},
+        description="Per-note act weights normalised to 1.0 (ki + sho + ten + ketsu = 1.0).",
+    )
     structural_hole: StructuralHole = Field(default_factory=StructuralHole)
 
 
@@ -1289,7 +1293,7 @@ def _build_constraint_map() -> dict[str, float]:
 
 
 def _store_node_tags(note_id: str, tags: list[str]) -> None:
-    """Persist aspect/topic tags on the graph node for cross-note heuristic scoring."""
+    """Persist tags on the graph node for cross-note heuristic scoring."""
     if note_id in graph:
         graph.nodes[note_id]["tags"] = tags
     else:
@@ -1418,6 +1422,71 @@ def _assign_macro_acts(
             assigned[cid] = "sho"
 
     return assigned
+
+
+def _compute_act_weights(
+    note_id: str,
+    macro: dict[str, int],
+    community_act_map: dict[int, str],
+    constraint_map: dict[str, float],
+    node_tags: dict[str, list[str]],
+) -> dict[str, float]:
+    """Soft per-note act weights normalised to 1.0.
+
+    Combines:
+      • Community act assignment (strong anchor, raw 3.0)
+      • Burt constraint pull toward Ten (low constraint → higher Ten weight)
+      • Neighbor community acts (each neighbor contributes 0.25 to its act bucket)
+      • Tag-based Ki signal (place/ and time/ tags add 0.2 each)
+      • Character role boosts from graph node attributes
+
+    Returns {act_name: weight} where values sum to 1.0, rounded to 4 dp.
+    """
+    acts = ["ki", "sho", "ten", "ketsu"]
+    raw: dict[str, float] = {a: 0.0 for a in acts}
+
+    # 1. Primary community act — strong anchor
+    macro_id = macro.get(note_id)
+    primary_act = community_act_map.get(macro_id, "sho") if macro_id is not None else "sho"
+    raw[primary_act] += 3.0
+
+    # 2. Constraint-based Ten signal (low constraint → structural hole → Ten pull)
+    constraint = constraint_map.get(note_id, 1.0)
+    ten_pull = max(0.0, 1.0 - constraint / TEN_CONSTRAINT_THRESHOLD)
+    raw["ten"] += ten_pull * 2.0
+
+    # 3. Neighbor community acts spread weight
+    if note_id in graph:
+        neighbors = list(graph.successors(note_id)) + list(graph.predecessors(note_id))
+        for neighbor in neighbors:
+            n_cid = macro.get(neighbor)
+            if n_cid is not None:
+                n_act = community_act_map.get(n_cid, "sho")
+                raw[n_act] += 0.25
+
+    # 4. Tag-based Ki signal
+    tags = node_tags.get(note_id, [])
+    place_time = sum(1 for t in tags if t.startswith("place/") or t.startswith("time/"))
+    raw["ki"] += place_time * 0.2
+
+    # 5. Character role signals from graph node attributes
+    if note_id in graph:
+        role = graph.nodes[note_id].get("character_role", "")
+        if role == "locus":
+            raw["ki"] += 0.5
+        elif role == "mirror":
+            raw["ki"] += 0.3
+        elif role == "dominant":
+            raw["sho"] += 0.3
+        elif role == "symbiote":
+            raw["sho"] += 0.25
+            raw["ten"] += 0.15
+
+    # Normalise to sum to 1.0
+    total = sum(raw.values())
+    if total <= 0.0:
+        return {a: 0.25 for a in acts}
+    return {a: round(raw[a] / total, 4) for a in acts}
 
 
 # Legacy single-resolution helper (used by /graph/communities)
@@ -2013,30 +2082,36 @@ def _default_beat_from_community(
 async def _run_stage_d_llm_classify(content: str) -> list[str]:
     """Stage D — affect scoring, unconditional on every note.
 
-    Uses OLLAMA_MODEL to classify the dominant emotional tone from an
-    expanded vocabulary: positive, negative, neutral, ambivalent,
-    melancholic, tense, hopeful.  Returns a single-element list
-    e.g. ``["affect/positive"]``.
-
-    Kept intentionally minimal — the prompt asks for one field so the LLM
-    has no opportunity to hallucinate unrelated output.
+    Uses OLLAMA_MODEL to classify 1–3 emotional tones from the expanded
+    vocabulary: positive, negative, neutral, ambivalent, melancholic,
+    tense, hopeful.  Returns a list e.g. ``["affect/tense", "affect/hopeful"]``.
     """
     prompt = (
         "You are an affect classifier for a narrative knowledge graph.\n"
-        "Read the note excerpt and classify its dominant emotional tone.\n"
-        "Choose exactly one value from: positive, negative, neutral, ambivalent, melancholic, tense, hopeful\n"
-        "Respond with valid JSON only:\n"
-        '{"affect": "<value>"}\n\n'
+        "Read the note excerpt and classify its emotional tone(s).\n"
+        "Choose 1 to 3 values from: positive, negative, neutral, ambivalent, melancholic, tense, hopeful\n"
+        "Respond with valid JSON only — no prose:\n"
+        '{"affects": ["<value>"]}\n\n'
         f"Text:\n{content[:1500]}\n\nJSON:"
     )
     try:
         result = await _ollama_complete(prompt, model=OLLAMA_MODEL, json_mode=True)
         if not isinstance(result, dict):
             return ["affect/neutral"]
-        affect = str(result.get("affect", "neutral")).strip()
-        if affect not in AFFECT_VALUES:
-            affect = "neutral"
-        return [f"affect/{affect}"]
+        raw_affects = result.get("affects", [])
+        # Graceful fallback: older model response may use singular "affect"
+        if not raw_affects and "affect" in result:
+            raw_affects = [result["affect"]]
+        if isinstance(raw_affects, str):
+            raw_affects = [raw_affects]
+        if not isinstance(raw_affects, list):
+            return ["affect/neutral"]
+        valid = [
+            f"affect/{a.strip()}"
+            for a in raw_affects
+            if isinstance(a, str) and a.strip() in AFFECT_VALUES
+        ]
+        return valid[:3] if valid else ["affect/neutral"]
     except Exception as exc:
         logger.warning("Stage D affect error: %s", exc)
         return ["affect/neutral"]
@@ -2067,7 +2142,7 @@ async def _run_narrative_auditor(
         "unplaced"
     )
     prompt = (
-        "You are a narrative analyst specialising in Kishōtenketsu (起承転結 — "
+        "You are a narrative analyst specialising in Kishōtenketsu (起承轉合 — "
         "Introduction, Development, Twist, Resolution).\n"
         "This knowledge-graph note has been flagged as a structural bridge "
         "(low Burt constraint: it connects otherwise separate clusters).\n\n"
@@ -2212,7 +2287,7 @@ def _extract_cluster_text(
 
     Each note block:
         Title: {note_id}
-        Tags: {aspect/ and topic/ tags}
+        Tags: {topic/, character/, place/, time/, object/ tags}
         Text: {first ~1500 chars, frontmatter stripped}
         ---
 
@@ -2503,8 +2578,13 @@ async def analyze(req: AnalyzeRequest):
     # Assemble final tag list
     # topic_tags: BERTopic topic/<label> tags (Stage B)
     # aspect_tags: spaCy NER character/, place/, time/, object/ tags (Stage C)
-    # affect_tags: LLM valence tags e.g. ["affect/positive"] (Stage D)
+    # affect_tags: LLM valence tags e.g. ["affect/tense", "affect/hopeful"] (Stage D)
     tags = _assemble_tags(topic_tags, aspect_tags, affect_tags, limit=10)
+
+    # Compute per-note act weights (soft distribution across all 4 acts)
+    act_weights = _compute_act_weights(
+        req.note_id, macro, community_act_map, constraint_map, node_tags
+    )
 
     # Build community tier info
     tiers: list[CommunityTier] = []
@@ -2528,6 +2608,7 @@ async def analyze(req: AnalyzeRequest):
         bridge_detected=bridge_detected,
         narrative_audit=narrative_audit,
         narrative_act=narrative_act,
+        act_weights=act_weights,
         structural_hole=structural_hole,
     )
 
@@ -2619,7 +2700,7 @@ async def ingest_character_graph(req: CharacterGraphIngestRequest):
 
     Translates CSG relation types to EdgeMatrix vocabulary, maps scene
     temporal position to Kishōtenketsu narrative_act, pre-seeds affect/
-    and code/ tags from CSG sentiment and first_appearance_scene, and
+    and affect/ tags from CSG sentiment, and
     writes stub .md files to VAULT_NOTES_DIR so _extract_cluster_text
     can include character text in arc generation.
 

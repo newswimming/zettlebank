@@ -106,6 +106,7 @@ export const AnalyzeResponseSchema = z.object({
 	bridge_detected: z.boolean().default(false),
 	narrative_audit: NarrativeAuditSchema.nullable().default(null),
 	narrative_act: z.string().default("sho"),
+	act_weights: z.record(z.string(), z.number()).default({ ki: 0.25, sho: 0.25, ten: 0.25, ketsu: 0.25 }),
 	structural_hole: StructuralHoleSchema.default({
 		constraint_score: 1.0,
 		is_ten_candidate: false,
