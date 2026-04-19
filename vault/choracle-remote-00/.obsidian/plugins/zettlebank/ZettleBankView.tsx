@@ -22,6 +22,7 @@ type SidebarState =
 interface SidebarProps {
 	state: SidebarState;
 	onAnalyze: () => void;
+	onPush: () => Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -628,8 +629,9 @@ const NarrativeArcPanel: FC<{ ollamaAlive: boolean }> = ({ ollamaAlive }) => {
 
 const ResultsPanel: React.FC<{
 	data: AnalyzeResponse;
-	onReanalyze: () => void;
-}> = ({ data, onReanalyze }) => {
+	onPush: () => Promise<void>;
+}> = ({ data, onPush }) => {
+	const [pushing, setPushing] = useState(false);
 	const affectTag = data.metadata.tags.find((t) => t.startsWith("affect/"));
 
 	return (
@@ -677,10 +679,11 @@ const ResultsPanel: React.FC<{
 			<div className="zettlebank-actions">
 				<button
 					className="zettlebank-btn-approve"
-					onClick={onReanalyze}
+					onClick={async () => { setPushing(true); try { await onPush(); } finally { setPushing(false); } }}
+					disabled={pushing}
 					type="button"
 				>
-					Re-analyze
+					{pushing ? "Pushing…" : "Push to Graph"}
 				</button>
 			</div>
 		</div>
@@ -691,7 +694,7 @@ const ResultsPanel: React.FC<{
 // Root sidebar
 // ---------------------------------------------------------------------------
 
-export function ZettleBankSidebar({ state, onAnalyze }: SidebarProps) {
+export function ZettleBankSidebar({ state, onAnalyze, onPush }: SidebarProps) {
 	const ollamaAlive = useHealth();
 	const [activeTab, setActiveTab] = useState<"analysis" | "arc">("analysis");
 
@@ -786,7 +789,7 @@ export function ZettleBankSidebar({ state, onAnalyze }: SidebarProps) {
 					)}
 
 					{state.phase === "results" && (
-						<ResultsPanel data={state.data} onReanalyze={() => onAnalyze()} />
+						<ResultsPanel data={state.data} onPush={onPush} />
 					)}
 				</>
 			)}

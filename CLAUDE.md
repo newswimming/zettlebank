@@ -120,7 +120,7 @@ aliases:          # text | null
 description:      # text | null
 note created:     # date (Obsidian-managed)
 last updated:     # date (written on approve)
-tags:             # list[str] — Obsidian path syntax: topic/, aspect/, affect/, code/
+tags:             # list[str] — Obsidian path syntax: topic/, character/, place/, time/, object/, affect/
 source:           # text | null
 citationID:       # text | null — Zotero / BibTeX key (camelCase, not snake_case)
 smart_relations:  # list[{link: str, type: RelationType, confidence: float}]
@@ -130,9 +130,8 @@ updated:          # ISO timestamp (written by plugin on every approve)
 ```
 
 - `smart_relations` entries use controlled vocabulary for `type`: contradicts, supports, potential_to, kinetic_to, motivates, hinders, related
-- `tags` use forward-slash path syntax for Obsidian's collapsible tag tree. Allowed prefixes: `topic/`, `aspect/`, `affect/`, `code/`
+- `tags` use forward-slash path syntax for Obsidian's collapsible tag tree. Allowed prefixes: `topic/`, `character/`, `place/`, `time/`, `object/`, `affect/`
 - `citationID` is camelCase — do not rename to `citation_id`
-- `code/` tag values must be one of the 16 Kishōtenketsu beat slugs (Rule 2) or `code/unplaced`
 - Do NOT add fields like Topics, Emotions, Character Arc, or Story Beat as top-level frontmatter keys
 
 ---
@@ -146,22 +145,23 @@ updated:          # ISO timestamp (written by plugin on every approve)
 
 ## Rule 6 — Graph Logic
 
-- Narrative clustering uses the **Leiden Algorithm** (not Louvain) at two resolutions: macro (γ=1.0) for Kishōtenketsu acts, micro (γ=2.0) for individual scene beats. Review `docs/decisions.md` (ADR-001) before modifying.
+- Narrative clustering uses the **Leiden Algorithm** (not Louvain) at macro resolution (γ=1.0) for Kishōtenketsu act assignment. The `/graph/communities/multi` diagnostic endpoint still exposes both macro and micro (γ=2.0), but the `/analyze` pipeline uses macro only. Review `docs/decisions.md` (ADR-001) before modifying.
 - Relation type classification is discriminative, not generative (ADR-002). Default fallback is `related`.
-- Beat position (Rule 2) must inform edge type selection — see mapping in Rule 2 § Mapping to the Pipeline.
 
 ---
 
 ## Rule 7 — Multi-Stage Pipeline
 
 The `/analyze` endpoint runs a multi-stage extraction pipeline:
-- **Stage A** (first, sequential): Graph topology + dual-resolution Leiden (γ=1.0 macro → act, γ=2.0 micro → beat)
+- **Stage A** (first, sequential): Graph topology + macro Leiden (γ=1.0 → act assignment)
 - **Stage B** (parallel, after A): BERTopic community keywords → Ollama LLM → `topic/<Label>` tag
-- **Stage C** (parallel with B): spaCy NER → `aspect/place`, `aspect/character`, `aspect/time`, `aspect/object`
-- **Stage D** (parallel with B+C): Ollama tinyllama → `affect/<value>` (positive/negative/mu) + `code/<beat>` (one of the 16 Kishōtenketsu beats)
+- **Stage C** (parallel with B): spaCy NER → `character/<entity>`, `place/<entity>`, `time/<entity>`, `object/<entity>`
+- **Stage D** (parallel with B+C): Ollama LLM → `affect/<value>` (positive / negative / neutral / ambivalent / melancholic / tense / hopeful)
 - **Assembly**: `_assemble_tags()` merges, deduplicates, and caps at 10 tags
 
-Tag prefixes: `topic/` (BERTopic), `aspect/` (spaCy NER), `affect/` (valence), `code/` (Kishōtenketsu beat)
+Tag prefixes: `topic/` (BERTopic), `character/` `place/` `time/` `object/` (spaCy NER), `affect/` (valence)
+
+Conditional **Narrative Auditor** (bridge_detected=True only): classifies structural bridge function and beat position; stored in `NarrativeAudit` response field only — does not emit tags.
 
 ---
 

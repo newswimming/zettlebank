@@ -126,20 +126,23 @@ def _aggregate_sentiment(sentiments: list[str]) -> str:
     """Majority-vote over CSG interaction sentiment values → affect/ tag value.
 
     CSG values: positive | neutral | negative | mixed
-    Zettlebank values: positive | negative | mu
+    Zettlebank values: positive | negative | neutral | ambivalent | melancholic | tense | hopeful
 
-    neutral and mixed both map to mu.
-    Returns mu on empty input or tie.
+    Returns neutral on empty input or tie (no mixed signals);
+    returns ambivalent when mixed signals are present on a tie.
     """
     if not sentiments:
-        return "mu"
+        return "neutral"
     pos = sum(1 for s in sentiments if s == "positive")
     neg = sum(1 for s in sentiments if s == "negative")
     if pos > neg:
         return "positive"
     if neg > pos:
         return "negative"
-    return "mu"
+    mixed = sum(1 for s in sentiments if s == "mixed")
+    if mixed > 0:
+        return "ambivalent"
+    return "neutral"
 
 
 def _aggregate_power_role(power_values: list[str]) -> str:
@@ -203,7 +206,7 @@ def _assign_character_role(
         return "locus"
 
     # ── Symbiote ─────────────────────────────────────────────────────────────
-    if power_role == "submissive" and agg_sentiment in ("positive", "mu"):
+    if power_role == "submissive" and agg_sentiment != "negative":
         target_counts: Counter[str] = Counter(i.dst for i in outbound_interactions)
         repeated_attachment = (
             bool(target_counts) and target_counts.most_common(1)[0][1] >= 2
@@ -322,8 +325,7 @@ SPACY_TO_ASPECT: dict[str, str] = {
 }
 
 ASPECT_TYPES = {"place", "time", "character", "object"}
-AFFECT_VALUES = {"positive", "negative", "mu"}
-CODE_VALUES = {"qi", "law", "mu"}
+AFFECT_VALUES = {"positive", "negative", "neutral", "ambivalent", "melancholic", "tense", "hopeful"}
 
 # Structural bridge threshold: Burt constraint below this → Ten-pivot candidate
 # M-3: Defensive parse — bad env value falls back to 0.4 rather than crashing at import.
@@ -1136,7 +1138,7 @@ def _build_character_subgraph() -> nx.DiGraph:
 
     Included node types:
     - Nodes with is_character_node=True  (CSG-ingested characters)
-    - Vault notes that carry at least one aspect/character/ tag
+    - Vault notes that carry at least one character/ tag
       (notes where spaCy NER or the LLM identified a character mention)
 
     All edges between these nodes are preserved.  Regular vault notes
@@ -1148,7 +1150,7 @@ def _build_character_subgraph() -> nx.DiGraph:
     for nid, data in graph.nodes(data=True):
         if data.get("is_character_node"):
             char_nodes.add(nid)
-        elif any(t.startswith("aspect/character/") for t in data.get("tags", [])):
+        elif any(t.startswith("character/") for t in data.get("tags", [])):
             char_nodes.add(nid)
     return graph.subgraph(char_nodes).copy()
 
@@ -1198,6 +1200,24 @@ def _detect_multi_resolution() -> tuple[
 
     return macro, micro, macro_labels, micro_labels
 
+
+def _detect_macro() -> tuple[dict[str, int], dict[int, str]]:
+    """Run Leiden at macro resolution only (γ=1.0).
+
+    Used by the /analyze endpoint and generate-arc to avoid the overhead of
+    the micro partition, which is only needed by the /graph/communities/multi
+    diagnostic endpoint.
+    """
+    if graph.number_of_nodes() < 2:
+        trivial = {n: 0 for n in graph.nodes()}
+        return trivial, {0: "Vault"}
+    ig_graph, reverse = _nx_to_igraph()
+    macro = _run_leiden(ig_graph, reverse, RESOLUTION_MACRO)
+    macro_labels = {
+        cid: _community_label(cid, macro)
+        for cid in set(macro.values())
+    }
+    return macro, macro_labels
 
 
 # ---------------------------------------------------------------------------
@@ -1296,7 +1316,7 @@ def _assign_macro_acts(
     Priority order:
     1. Ten   — community with highest concentration of low-constraint nodes
                (constraint < TEN_CONSTRAINT_THRESHOLD).
-    2. Ki    — community with highest (aspect/place + aspect/time tag count)
+    2. Ki    — community with highest (place/ + time/ tag count)
                divided by mean out-degree.
     3. Ketsu — community with highest in-degree originating from Ki and Ten nodes.
     4. Sho   — all remaining communities.
@@ -1340,7 +1360,7 @@ def _assign_macro_acts(
         tag_count = sum(
             sum(
                 1 for t in node_tags.get(n, [])
-                if t.startswith("aspect/place") or t.startswith("aspect/time")
+                if t.startswith("place/") or t.startswith("time/")
             )
             for n in nodes
         )
@@ -1680,7 +1700,7 @@ def _fit_bertopic_on_vault(char_only: bool = False) -> None:
     char_only=False (default): fit on every .md in the vault — used after
         bulk /graph/ingest so the full portfolio narrative is represented.
     char_only=True: restrict the corpus to character nodes and vault notes
-        that carry at least one aspect/character/ tag.  Used after
+        that carry at least one character/ tag.  Used after
         /graph/ingest-character-graph so character topic extraction is not
         diluted by unrelated portfolio notes.
 
@@ -1901,10 +1921,10 @@ async def _run_stage_b_topic(
 
 
 def _run_stage_c_aspects(content: str) -> list[str]:
-    """Stage C: spaCy NER → aspect/category/entity tags.
+    """Stage C: spaCy NER → category/entity tags (character/, place/, time/, object/).
 
     For each detected entity, records its slugified text under the
-    appropriate aspect category.  Uses a Counter per category so that
+    appropriate category.  Uses a Counter per category so that
     entities mentioned more than once rank higher; the top-3 by frequency
     are kept per category to cap tag explosion.  Slug deduplication means
     surface variants ("Mexico"/"Mexican" under different labels) don't
@@ -1916,16 +1936,16 @@ def _run_stage_c_aspects(content: str) -> list[str]:
     doc = _nlp(content[:100000])
     found: dict[str, Counter] = {}
     for ent in doc.ents:
-        aspect = SPACY_TO_ASPECT.get(ent.label_)
-        if aspect:
+        category = SPACY_TO_ASPECT.get(ent.label_)
+        if category:
             slug = _slugify(ent.text)
             if slug:
-                found.setdefault(aspect, Counter())[slug] += 1
+                found.setdefault(category, Counter())[slug] += 1
 
     tags: list[str] = []
     for category in sorted(found):
         for slug, _ in found[category].most_common(3):
-            tags.append(f"aspect/{category}/{slug}")
+            tags.append(f"{category}/{slug}")
     return tags
 
 
@@ -1966,7 +1986,7 @@ async def _ollama_complete(prompt: str, model: str = OLLAMA_MODEL,
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
-            return {"affect": "mu", "code": "mu"}
+            return {"affect": "neutral", "code": "unplaced"}
     return raw
 
 
@@ -1991,44 +2011,46 @@ def _default_beat_from_community(
 
 
 async def _run_stage_d_llm_classify(content: str) -> list[str]:
-    """Stage D — fast affect scoring, unconditional on every note.
+    """Stage D — affect scoring, unconditional on every note.
 
-    Uses OLLAMA_MODEL (lightweight) to classify valence only: positive,
-    negative, or mu (neutral/ambiguous).  Returns a single-element list
+    Uses OLLAMA_MODEL to classify the dominant emotional tone from an
+    expanded vocabulary: positive, negative, neutral, ambivalent,
+    melancholic, tense, hopeful.  Returns a single-element list
     e.g. ``["affect/positive"]``.
 
     Kept intentionally minimal — the prompt asks for one field so the LLM
-    has no opportunity to hallucinate unrelated output.  The heavy Narrative
-    Auditor is reserved for Ten-candidates (bridge_detected=True).
+    has no opportunity to hallucinate unrelated output.
     """
     prompt = (
-        "You are a valence classifier for a knowledge graph.\n"
-        "Read the note excerpt and respond with valid JSON only:\n"
-        '{"affect": "<positive|negative|mu>"}\n\n'
+        "You are an affect classifier for a narrative knowledge graph.\n"
+        "Read the note excerpt and classify its dominant emotional tone.\n"
+        "Choose exactly one value from: positive, negative, neutral, ambivalent, melancholic, tense, hopeful\n"
+        "Respond with valid JSON only:\n"
+        '{"affect": "<value>"}\n\n'
         f"Text:\n{content[:1500]}\n\nJSON:"
     )
     try:
         result = await _ollama_complete(prompt, model=OLLAMA_MODEL, json_mode=True)
         if not isinstance(result, dict):
-            return ["affect/mu"]
-        affect = str(result.get("affect", "mu")).strip()
+            return ["affect/neutral"]
+        affect = str(result.get("affect", "neutral")).strip()
         if affect not in AFFECT_VALUES:
-            affect = "mu"
+            affect = "neutral"
         return [f"affect/{affect}"]
     except Exception as exc:
         logger.warning("Stage D affect error: %s", exc)
-        return ["affect/mu"]
+        return ["affect/neutral"]
 
 
 async def _run_narrative_auditor(
     note_id: str,
     content: str,
     bridge_nodes: list[str],
-) -> tuple[list[str], NarrativeAudit]:
+) -> NarrativeAudit:
     """Agent 3 — Narrative Auditor (Llama 3.1), conditional on bridge detection.
 
-    Classifies the note's 16-beat Kishōtenketsu position and summarises its
-    structural bridge function.  Returns (combined_tags, NarrativeAudit).
+    Classifies the note's structural bridge function and summarises its
+    Kishōtenketsu position.  Returns a NarrativeAudit.
     Only called when Burt constraint < BURT_BRIDGE_THRESHOLD.
     """
     fallback_beat = "ten-9"  # Bridge notes typically occupy the Ten (pivot) act
@@ -2070,7 +2092,7 @@ async def _run_narrative_auditor(
             prompt, model=NARRATIVE_AUDITOR_MODEL, json_mode=True
         )
         if not isinstance(result, dict):
-            return [f"code/{fallback_beat}"], fallback_audit
+            return fallback_audit
 
         beat = str(result.get("beat_position", fallback_beat)).strip()
         if beat not in BEAT_CODES:
@@ -2080,29 +2102,27 @@ async def _run_narrative_auditor(
         summary = str(result.get("narrative_summary", "")).strip()
         summary = re.sub(r"[\r\n]+", " ", summary)[:500]
         summary = summary.replace("---", "- - -")
-        audit = NarrativeAudit(
+        return NarrativeAudit(
             beat_position=beat,
             bridge_note_ids=[_slugify(n) for n in bridge_nodes if _slugify(n)],
             narrative_summary=summary,
         )
-        return [f"code/{beat}"], audit
 
     except Exception as exc:
         logger.warning("Narrative Auditor error: %s", exc)
-        return [f"code/{fallback_beat}"], fallback_audit
+        return fallback_audit
 
 
 def _assemble_tags(
     topic_tags: list[str],
     aspect_tags: list[str],
     affect_tags: list[str],
-    code_tags: list[str],
     limit: int = 10,
 ) -> list[str]:
     """Merge all pipeline tags, dedup, cap at limit."""
     seen: set[str] = set()
     result: list[str] = []
-    for tag in topic_tags + aspect_tags + affect_tags + code_tags:
+    for tag in topic_tags + aspect_tags + affect_tags:
         if tag not in seen:
             seen.add(tag)
             result.append(tag)
@@ -2207,7 +2227,7 @@ def _extract_cluster_text(
 
     for nid in note_ids:
         tags = graph.nodes[nid].get("tags", []) if nid in graph else []
-        display_tags = [t for t in tags if t.startswith("aspect/") or t.startswith("topic/")]
+        display_tags = [t for t in tags if t.startswith("character/") or t.startswith("place/") or t.startswith("time/") or t.startswith("object/") or t.startswith("topic/")]
 
         note_path = _find_note_path(nid)
         excerpt = ""
@@ -2405,12 +2425,9 @@ async def analyze(req: AnalyzeRequest):
     _save_graph()
     # Leiden is CPU-bound; offload to a thread so the event loop stays
     # responsive to other requests while the graph partition runs.
-    macro, micro, macro_labels, micro_labels = await asyncio.to_thread(
-        _detect_multi_resolution
-    )
+    macro, macro_labels = await asyncio.to_thread(_detect_macro)
 
     macro_id = macro.get(req.note_id)
-    micro_id  = micro.get(req.note_id)
 
     # Bridge detection: low Burt constraint = structural hole = Ten-pivot candidate
     bridge_score    = _compute_bridge_score(req.note_id)
@@ -2477,18 +2494,17 @@ async def analyze(req: AnalyzeRequest):
     # --- Agent 3: Narrative Auditor — conditional on bridge detection ---
     if bridge_detected:
         logger.info("Narrative Auditor triggered for %s", req.note_id)
-        llm_tags, narrative_audit = await _run_narrative_auditor(
+        narrative_audit = await _run_narrative_auditor(
             req.note_id, req.content, bridge_nodes
         )
     else:
-        default_beat    = _default_beat_from_community(req.note_id, macro_id, macro_labels)
-        llm_tags        = [f"code/{default_beat}"]
         narrative_audit = None
 
     # Assemble final tag list
-    # affect_tags: from Stage D (unconditional valence, e.g. ["affect/positive"])
-    # llm_tags:    code/ beat from Narrative Auditor or community-label fallback
-    tags = _assemble_tags(topic_tags, aspect_tags, affect_tags, llm_tags, limit=10)
+    # topic_tags: BERTopic topic/<label> tags (Stage B)
+    # aspect_tags: spaCy NER character/, place/, time/, object/ tags (Stage C)
+    # affect_tags: LLM valence tags e.g. ["affect/positive"] (Stage D)
+    tags = _assemble_tags(topic_tags, aspect_tags, affect_tags, limit=10)
 
     # Build community tier info
     tiers: list[CommunityTier] = []
@@ -2497,12 +2513,6 @@ async def analyze(req: AnalyzeRequest):
             resolution=RESOLUTION_MACRO,
             label=macro_labels.get(macro_id, "Unknown"),
             community_id=macro_id,
-        ))
-    if micro_id is not None:
-        tiers.append(CommunityTier(
-            resolution=RESOLUTION_MICRO,
-            label=micro_labels.get(micro_id, "Unknown"),
-            community_id=micro_id,
         ))
 
     narrative = NarrativeMetadata(
@@ -2657,20 +2667,14 @@ async def ingest_character_graph(req: CharacterGraphIngestRequest):
             continue
 
         # Derive tags
-        tags: list[str] = [f"aspect/character/{note_id}"]
+        tags: list[str] = [f"character/{note_id}"]
         for alias in char.aliases:
             alias_slug = _slugify(alias)
-            if alias_slug and alias_slug != note_id and f"aspect/character/{alias_slug}" not in tags:
-                tags.append(f"aspect/character/{alias_slug}")
+            if alias_slug and alias_slug != note_id and f"character/{alias_slug}" not in tags:
+                tags.append(f"character/{alias_slug}")
 
         affect = _aggregate_sentiment(char_sentiments.get(char.canon_name, []))
         tags.append(f"affect/{affect}")
-
-        if char.first_appearance_scene:
-            beat = _scene_to_beat(char.first_appearance_scene, req.total_scenes)
-        else:
-            beat = "ki-2"
-        tags.append(f"code/{beat}")
 
         # Derive node attributes from CSG data
         power_role = _aggregate_power_role(char_power.get(char.canon_name, []))
@@ -2797,55 +2801,30 @@ async def ingest_character_graph(req: CharacterGraphIngestRequest):
 
     # ── Cross-reference existing vault notes ────────────────────────────────
     # For every character just ingested, scan the vault graph for notes that
-    # already carry an aspect/character/<slug> tag (written by spaCy NER
-    # during /analyze calls).  Add a directed `related` edge from each such
-    # note to the character node so that the character subgraph captures
-    # zettlebank-native context alongside the CSG screenplay data.
-    #
-    # We also patch the character node's beat code if a vault note provides a
-    # more specific code/ tag than the default ki-2 assigned from
-    # first_appearance_scene: the most common code/ tag across mentioning notes
-    # wins.  This propagates the portfolio narrative position of a character
-    # (as observed in the Obsidian vault) into the character node itself.
+    # already carry a character/<slug> tag (written by spaCy NER during
+    # /analyze calls).  Add a directed `related` edge from each such note to
+    # the character node so the character subgraph captures zettlebank-native
+    # context alongside the CSG screenplay data.
     vault_refs_total = 0
     for char in req.characters:
         note_id = _slugify(char.canon_name)
         if not note_id or note_id not in graph:
             continue
-        char_tag = f"aspect/character/{note_id}"
-        beat_votes: Counter[str] = Counter()
+        char_tag = f"character/{note_id}"
         for nid, ndata in list(graph.nodes(data=True)):
             if nid == note_id or ndata.get("is_character_node"):
                 continue
             if char_tag not in ndata.get("tags", []):
                 continue
-            # Determine narrative_act from the mentioning note's code/ tag
-            note_act = NarrativeActEnum.ki
-            for tag in ndata.get("tags", []):
-                if tag.startswith("code/"):
-                    beat_slug = tag[5:]  # strip "code/"
-                    act_from_beat = _scene_to_act(
-                        f"SCENE_{beat_slug.split('-')[-1]}", 16
-                    )
-                    note_act = act_from_beat
-                    beat_votes[beat_slug] += 1
-                    break
             vault_edge = EdgeMatrix(
                 target_id=note_id,
                 relation_type=RelationType.related,
-                narrative_act=note_act,
+                narrative_act=NarrativeActEnum.ki,
                 confidence=0.7,
                 provenance=ProvenanceEnum.wikilink,
             )
             _upsert_edges(nid, [vault_edge])
             vault_refs_total += 1
-        # Patch character node beat code if vault evidence overrides CSG default
-        if beat_votes:
-            dominant_beat = beat_votes.most_common(1)[0][0]
-            existing_tags: list[str] = list(graph.nodes[note_id].get("tags", []))
-            patched = [t for t in existing_tags if not t.startswith("code/")]
-            patched.append(f"code/{dominant_beat}")
-            _store_node_tags(note_id, patched)
 
     if vault_refs_total:
         logger.info(
@@ -2970,7 +2949,7 @@ async def generate_arc(req: GenerateArcRequest):
     previously generated beats as context.  Locked acts return empty strings.
     """
     # ── Derive community structure ─────────────────────────────────────────────
-    macro, _micro, _macro_labels, _micro_labels = _detect_multi_resolution()
+    macro, _macro_labels = _detect_macro()
     constraint_map = _build_constraint_map()
     node_tags = _get_all_node_tags()
     community_act_map = _assign_macro_acts(macro, graph, constraint_map, node_tags)
@@ -3011,7 +2990,7 @@ async def generate_arc(req: GenerateArcRequest):
         """Return (character_str, place_str) from stored graph node tags.
 
         Confirmed character nodes (is_character_node=True, where the node id
-        matches at least one aspect/character/ tag leaf) are listed before
+        matches at least one character/ tag leaf) are listed before
         NER-extracted character mentions so that actual story characters are
         not displaced by generic NER tokens like 'photographs' or 'japanese'.
         """
@@ -3025,7 +3004,7 @@ async def generate_arc(req: GenerateArcRequest):
             node_data = graph.nodes[nid]
             is_char_node = node_data.get("is_character_node", False)
             for tag in node_data.get("tags", []):
-                if tag.startswith("aspect/character/"):
+                if tag.startswith("character/"):
                     entity = tag.split("/")[-1]
                     if is_char_node and entity == nid:
                         if entity not in confirmed_chars:
@@ -3033,7 +3012,7 @@ async def generate_arc(req: GenerateArcRequest):
                     else:
                         if entity not in inferred_chars:
                             inferred_chars.append(entity)
-                elif tag.startswith("aspect/place/"):
+                elif tag.startswith("place/"):
                     entity = tag.split("/")[-1]
                     if entity not in places:
                         places.append(entity)
@@ -3230,7 +3209,7 @@ def export_hydrated():
             "links": [{"source": str, "target": str, <edge attrs>}]
         }
     """
-    macro, _, _, _ = _detect_multi_resolution()
+    macro, _ = _detect_macro()
     constraint_map = _build_constraint_map()
 
     nodes = []

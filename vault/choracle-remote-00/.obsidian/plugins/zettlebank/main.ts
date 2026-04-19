@@ -61,11 +61,6 @@ function extractBody(content: string): string {
 	return match ? match[1].trim() : content.trim();
 }
 
-/** Counts whitespace-delimited words in a string. */
-function wordCount(text: string): number {
-	return text.split(/\s+/).filter(Boolean).length;
-}
-
 /**
  * Non-cryptographic djb2 hash — used only to detect body changes between
  * saves. Not stored anywhere persistent; collisions are acceptable.
@@ -278,6 +273,7 @@ class ZettleBankView extends ItemView {
 				createElement(ZettleBankSidebar, {
 					state: this.state,
 					onAnalyze: () => this.plugin.analyzeActiveNote(),
+					onPush: () => this.plugin.pushActiveNote(),
 				})
 			)
 		);
@@ -367,9 +363,10 @@ export default class ZettleBankPlugin extends Plugin {
 
 		this.addSettingTab(new ZettleBankSettingTab(this.app, this));
 
-		// Vault watchers: auto-analyze new notes and sync frontmatter edits back to graph.
-		// Both create and modify route through _scheduleFileChange with different debounce
-		// windows. The suppress set prevents a post-write modify from re-triggering analysis.
+		// Vault watchers: auto-analyze new notes (first write only) and sync
+		// frontmatter edits back to the graph for all subsequent changes.
+		// Both events route through _handleFileChange with different debounce windows.
+		// The suppress set prevents a post-write modify from re-triggering the handler.
 		const scheduleChange = (file: TFile, debounceMs: number) => {
 			if (!(file instanceof TFile)) return;
 			if (file.extension !== "md") return;
@@ -435,70 +432,47 @@ export default class ZettleBankPlugin extends Plugin {
 	 * Central routing method called by both the create and modify vault watchers.
 	 *
 	 * Decision tree:
-	 *   • No plugin frontmatter (no `updated` field) + body ≥ 300 words → auto-analyze
-	 *   • Has plugin frontmatter, first time seen since plugin load:
-	 *       – mtime > updated + 60 s → body likely changed → auto-analyze
-	 *       – otherwise             → metadata edit only  → graph sync
-	 *   • Has plugin frontmatter, hash tracked:
-	 *       – body hash changed  → auto-analyze
-	 *       – body hash same     → frontmatter edit only → graph sync
+	 *   • No `updated` field (note never analyzed) + body ≥ 300 chars
+	 *       → auto-analyze ONCE, write frontmatter, done.
+	 *   • `updated` field present (already analyzed, any subsequent edit)
+	 *       → sync frontmatter to graph only, never re-analyze automatically.
+	 *
+	 * Auto-analysis is intentionally one-shot.  After the first write the note
+	 * is owned by the user: manual edits to tags, relations, and scalars are
+	 * propagated to the graph via syncNoteToGraph but the backend never
+	 * overwrites them through the automatic path.  The sidebar "Analyze" button
+	 * remains available for intentional re-analysis.
 	 */
 	private async _handleFileChange(file: TFile): Promise<void> {
 		const content = await this.app.vault.cachedRead(file);
 		const body    = extractBody(content);
 		const newHash = simpleHash(body);
-		const words   = wordCount(body);
 
 		const cache = this.app.metadataCache.getFileCache(file);
 		const fm    = cache?.frontmatter;
 
 		// `updated` is written by this plugin on every analysis — its presence
-		// indicates the note has been through the pipeline at least once.
+		// is the canonical marker that the note has been through the pipeline.
 		const hasPluginFrontmatter = typeof fm?.updated === "string";
 
-		const prevHash = this._bodyHashes.get(file.path);
-
-		// ── Branch 1: no plugin frontmatter ─────────────────────────────────
+		// ── First-time note: auto-analyze once ──────────────────────────────
 		if (!hasPluginFrontmatter) {
-			if (words >= 300) {
+			if (body.length >= 300) {
 				this._bodyHashes.set(file.path, newHash);
 				await this._autoAnalyzeFile(file, content);
 			}
-			// Below threshold: do nothing — wait for more content
+			// Below threshold: wait for more content, do nothing.
 			return;
 		}
 
-		// ── Branch 2: plugin frontmatter present, first seen this session ───
-		if (prevHash === undefined) {
+		// ── Already analyzed: sync only, never re-analyze automatically ─────
+		// Update the tracked hash so the sidebar state stays current, then push
+		// whatever frontmatter the user has written back to the graph.
+		// This covers both body edits and manual frontmatter changes.
+		if (this._bodyHashes.get(file.path) !== newHash) {
 			this._bodyHashes.set(file.path, newHash);
-
-			const lastUpdated = new Date(fm.updated as string).getTime();
-			const staleness   = file.stat.mtime - lastUpdated; // ms
-
-			if (words >= 300 && staleness > 60_000) {
-				// File was edited more than 60 s after last analysis → re-analyze
-				await this._autoAnalyzeFile(file, content);
-			} else {
-				// Freshly opened or only frontmatter touched → sync metadata
-				await syncNoteToGraph(this.app, file, this.settings.backendUrl);
-			}
-			return;
 		}
-
-		// ── Branch 3: hash already known ────────────────────────────────────
-		if (newHash !== prevHash) {
-			// Body changed
-			this._bodyHashes.set(file.path, newHash);
-			if (words >= 300) {
-				await this._autoAnalyzeFile(file, content);
-			} else {
-				// Dropped below threshold (e.g. user deleted content) → sync only
-				await syncNoteToGraph(this.app, file, this.settings.backendUrl);
-			}
-		} else {
-			// Body unchanged — only frontmatter was edited → sync to graph
-			await syncNoteToGraph(this.app, file, this.settings.backendUrl);
-		}
+		await syncNoteToGraph(this.app, file, this.settings.backendUrl);
 	}
 
 	/**
@@ -537,8 +511,22 @@ export default class ZettleBankPlugin extends Plugin {
 	}
 
 	/**
+	 * Pushes the active note's current frontmatter to the NetworkX graph via
+	 * /graph/sync-note.  Does not re-analyze — reflects manual edits only.
+	 */
+	async pushActiveNote(): Promise<void> {
+		const file = this.app.workspace.getActiveFile();
+		if (!file) return;
+		try {
+			await syncNoteToGraph(this.app, file, this.settings.backendUrl);
+		} catch (err) {
+			console.warn("[ZettleBank] push failed:", file.path, err);
+		}
+	}
+
+	/**
 	 * Reads the active note and sends it to the backend for analysis.
-	 * Transitions the sidebar: idle/error → loading → results (on success) or error (on failure).
+	 * Transitions the sidebar: loading → results (on success) or error (on failure).
 	 * Auto-writes frontmatter immediately after a successful analysis.
 	 */
 	async analyzeActiveNote(): Promise<void> {
