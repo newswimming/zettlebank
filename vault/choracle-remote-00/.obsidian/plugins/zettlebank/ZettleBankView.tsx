@@ -1,9 +1,7 @@
-import { useState, useCallback, useEffect, type FC } from "react";
-import type { ApprovedPayload } from "./main";
+import React, { useState, useEffect, type FC } from "react";
 import type {
 	AnalyzeResponse,
 	EdgeMatrix,
-	NarrativeMetadata,
 	NarrativeAudit,
 	RelationType,
 	StructuralHole,
@@ -18,13 +16,12 @@ import { validateGenerateArcResponse } from "./schema";
 type SidebarState =
 	| { phase: "idle" }
 	| { phase: "loading" }
-	| { phase: "staging"; data: AnalyzeResponse }
+	| { phase: "results"; data: AnalyzeResponse }
 	| { phase: "error"; message: string };
 
 interface SidebarProps {
 	state: SidebarState;
 	onAnalyze: () => void;
-	onApprove: (payload: ApprovedPayload) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -134,24 +131,17 @@ const VALENCE_STYLES: Record<string, { color: string; bg: string; label: string 
 
 const ValenceBadge: FC<{
 	affectTag: string | undefined;
-	accepted: boolean;
-	onToggle: () => void;
-}> = ({ affectTag, accepted, onToggle }) => {
+}> = ({ affectTag }) => {
 	if (!affectTag) return null;
 	const value = affectTag.slice("affect/".length);
 	const style = VALENCE_STYLES[value] ?? VALENCE_STYLES["mu"];
 	return (
-		<button
-			type="button"
-			onClick={onToggle}
-			title={accepted ? "Click to reject affect tag" : "Click to accept affect tag"}
+		<div
 			style={{
 				display: "flex", alignItems: "center", gap: "8px",
 				width: "100%", padding: "8px 12px", boxSizing: "border-box",
 				borderRadius: "var(--radius-m)", border: `1px solid ${style.color}`,
-				background: style.bg, cursor: "pointer",
-				opacity: accepted ? 1 : 0.45,
-				textDecoration: accepted ? "none" : "line-through",
+				background: style.bg,
 			}}
 		>
 			<span style={LABEL_STYLE}>Emotional Valence</span>
@@ -161,7 +151,7 @@ const ValenceBadge: FC<{
 			<span style={{ marginLeft: "auto", fontFamily: "var(--font-monospace)", fontSize: "var(--font-ui-smaller)", color: "var(--text-faint)" }}>
 				{affectTag}
 			</span>
-		</button>
+		</div>
 	);
 };
 
@@ -460,176 +450,6 @@ const RelationCard: FC<{
 };
 
 // ---------------------------------------------------------------------------
-// Staging Area
-// ---------------------------------------------------------------------------
-
-const STANDARD_TAG_PREFIXES = ["topic", "aspect", "code"] as const;
-
-const StagingArea: FC<{
-	data: AnalyzeResponse;
-	onApprove: (payload: ApprovedPayload) => void;
-	onReanalyze: () => void;
-}> = ({ data, onApprove, onReanalyze }) => {
-
-	const [acceptedTags, setAcceptedTags] = useState<Set<string>>(
-		() => new Set(data.metadata.tags)
-	);
-	const toggleTag = useCallback((tag: string) => {
-		setAcceptedTags((prev) => {
-			const next = new Set(prev);
-			if (next.has(tag)) next.delete(tag); else next.add(tag);
-			return next;
-		});
-	}, []);
-
-	const [description, setDescription] = useState(data.metadata.description ?? "");
-
-	const [acceptedRels, setAcceptedRels] = useState<Set<string>>(
-		() => new Set(data.metadata.smart_relations.map((r) => `${r.target_id}::${r.relation_type}`))
-	);
-	const toggleRelation = useCallback((key: string) => {
-		setAcceptedRels((prev) => {
-			const next = new Set(prev);
-			if (next.has(key)) next.delete(key); else next.add(key);
-			return next;
-		});
-	}, []);
-
-	const [targetEdits, setTargetEdits] = useState<Map<string, string>>(
-		() => new Map(data.metadata.smart_relations.map((r) => [
-			`${r.target_id}::${r.relation_type}`, r.target_id,
-		]))
-	);
-	const updateTargetId = useCallback((key: string, next: string) => {
-		setTargetEdits((prev) => new Map(prev).set(key, next));
-	}, []);
-
-	const affectTag = data.metadata.tags.find((t) => t.startsWith("affect/"));
-	const tagGroups = groupTagsByPrefix(data.metadata.tags);
-
-	const totalRels    = data.metadata.smart_relations.length;
-	const acceptedCount = data.metadata.smart_relations.filter(
-		(r) => acceptedRels.has(`${r.target_id}::${r.relation_type}`)
-	).length;
-
-	const handleApprove = useCallback(() => {
-		const approvedRelations: EdgeMatrix[] = data.metadata.smart_relations
-			.filter((r) => acceptedRels.has(`${r.target_id}::${r.relation_type}`))
-			.map((r) => ({
-				...r,
-				target_id: targetEdits.get(`${r.target_id}::${r.relation_type}`) ?? r.target_id,
-			}));
-
-		const metadata: NarrativeMetadata = {
-			aliases:         data.metadata.aliases,
-			description:     description.trim() || null,
-			tags:            Array.from(acceptedTags),
-			smart_relations: approvedRelations,
-			source:          data.metadata.source,
-			citationID:      data.metadata.citationID,
-		};
-		onApprove({ metadata, community_id: data.community_id });
-	}, [data, acceptedTags, description, acceptedRels, targetEdits, onApprove]);
-
-	return (
-		<div className="zettlebank-staging">
-
-			{/* 1. Emotional Valence */}
-			<ValenceBadge
-				affectTag={affectTag}
-				accepted={affectTag ? acceptedTags.has(affectTag) : false}
-				onToggle={() => affectTag && toggleTag(affectTag)}
-			/>
-
-			{/* 2. Structural Analysis (act, communities, Burt score) */}
-			<StructuralCard
-				narrativeAct={data.narrative_act}
-				communityTiers={data.community_tiers}
-				structuralHole={data.structural_hole}
-			/>
-
-			{/* 3. Pivot Analysis — whenever is_ten_candidate */}
-			{data.structural_hole.is_ten_candidate && (
-				<PivotAnalysisCard
-					structuralHole={data.structural_hole}
-					audit={data.narrative_audit ?? null}
-				/>
-			)}
-
-			{/* 4. Bridge Network — whenever bridge_detected */}
-			{data.bridge_detected && data.narrative_audit && (
-				<BridgeCard audit={data.narrative_audit} />
-			)}
-
-			{/* 5. Description */}
-			<DescriptionCard value={description} onChange={setDescription} />
-
-			{/* 6. Tag group cards (topic/, aspect/, code/) */}
-			{STANDARD_TAG_PREFIXES.map((prefix) => (
-				<TagGroupCard
-					key={prefix}
-					prefix={prefix}
-					tags={tagGroups[prefix] ?? []}
-					accepted={acceptedTags}
-					onToggle={toggleTag}
-				/>
-			))}
-
-			{/* 7. EdgeMatrix / smart_relations */}
-			<div className="zettlebank-card">
-				<div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: totalRels > 0 ? "6px" : 0 }}>
-					<h4 className="zettlebank-card-label" style={{ margin: 0 }}>
-						smart_relations
-					</h4>
-					{totalRels > 0 && (
-						<span style={{ fontSize: "var(--font-ui-smaller)", color: "var(--text-faint)" }}>
-							{acceptedCount}/{totalRels} accepted
-						</span>
-					)}
-				</div>
-
-				{totalRels > 0 ? (
-					data.metadata.smart_relations.map((rel) => {
-						const key = `${rel.target_id}::${rel.relation_type}`;
-						return (
-							<RelationCard
-								key={key}
-								rel={rel}
-								currentAct={data.narrative_act}
-								accepted={acceptedRels.has(key)}
-								editedTargetId={targetEdits.get(key) ?? rel.target_id}
-								onToggle={() => toggleRelation(key)}
-								onTargetChange={(v) => updateTargetId(key, v)}
-							/>
-						);
-					})
-				) : (
-					<span className="zettlebank-empty">No relations detected</span>
-				)}
-			</div>
-
-			{/* 8. Community badge */}
-			{data.community_id !== null && (
-				<div className="zettlebank-community">
-					<span className="zettlebank-community-label">Community</span>
-					<span className="zettlebank-community-id">{data.community_id}</span>
-				</div>
-			)}
-
-			{/* 9. Action bar */}
-			<div className="zettlebank-actions">
-				<button className="zettlebank-btn-approve" onClick={handleApprove} type="button">
-					Approve &amp; Write
-				</button>
-				<button className="zettlebank-btn-secondary" onClick={onReanalyze} type="button">
-					Re-analyze
-				</button>
-			</div>
-		</div>
-	);
-};
-
-// ---------------------------------------------------------------------------
 // Description Card
 // ---------------------------------------------------------------------------
 
@@ -803,10 +623,75 @@ const NarrativeArcPanel: FC<{ ollamaAlive: boolean }> = ({ ollamaAlive }) => {
 };
 
 // ---------------------------------------------------------------------------
+// Results Panel  (shown after auto-approve write)
+// ---------------------------------------------------------------------------
+
+const ResultsPanel: React.FC<{
+	data: AnalyzeResponse;
+	onReanalyze: () => void;
+}> = ({ data, onReanalyze }) => {
+	const affectTag = data.metadata.tags.find((t) => t.startsWith("affect/"));
+
+	return (
+		<div className="zettlebank-staging">
+			{affectTag && <ValenceBadge affectTag={affectTag} />}
+
+			<div className="zettlebank-card">
+				<h4 className="zettlebank-card-label">community</h4>
+				<span className="zettlebank-chip">
+					{data.community_id !== null ? `#${data.community_id}` : "—"}
+				</span>
+			</div>
+
+			<div className="zettlebank-card">
+				<h4 className="zettlebank-card-label">tags</h4>
+				<div className="zettlebank-chip-row">
+					{data.metadata.tags
+						.filter((t) => !t.startsWith("affect/"))
+						.map((t) => (
+							<span key={t} className="zettlebank-chip">{t}</span>
+						))}
+				</div>
+			</div>
+
+			<div className="zettlebank-card">
+				<h4 className="zettlebank-card-label">smart_relations</h4>
+				{data.metadata.smart_relations.length > 0 ? (
+					<div className="zettlebank-relation-list">
+						{data.metadata.smart_relations.map((rel) => (
+							<div key={`${rel.target_id}::${rel.relation_type}`} className="zettlebank-relation-row">
+								<span className="zettlebank-rel-type">{rel.relation_type}</span>
+								<span className="zettlebank-rel-arrow">→</span>
+								<span className="zettlebank-rel-target">{rel.target_id}</span>
+								<span className="zettlebank-rel-conf">
+									{(rel.confidence * 100).toFixed(0)}%
+								</span>
+							</div>
+						))}
+					</div>
+				) : (
+					<span className="zettlebank-empty">No relations detected</span>
+				)}
+			</div>
+
+			<div className="zettlebank-actions">
+				<button
+					className="zettlebank-btn-approve"
+					onClick={onReanalyze}
+					type="button"
+				>
+					Re-analyze
+				</button>
+			</div>
+		</div>
+	);
+};
+
+// ---------------------------------------------------------------------------
 // Root sidebar
 // ---------------------------------------------------------------------------
 
-export function ZettleBankSidebar({ state, onAnalyze, onApprove }: SidebarProps) {
+export function ZettleBankSidebar({ state, onAnalyze }: SidebarProps) {
 	const ollamaAlive = useHealth();
 	const [activeTab, setActiveTab] = useState<"analysis" | "arc">("analysis");
 
@@ -832,7 +717,7 @@ export function ZettleBankSidebar({ state, onAnalyze, onApprove }: SidebarProps)
 				<h3>ZettleBank</h3>
 				{activeTab === "analysis" &&
 					state.phase !== "loading" &&
-					state.phase !== "staging" && (
+					state.phase !== "results" && (
 						<button
 							className="zettlebank-analyze-btn"
 							onClick={onAnalyze}
@@ -900,8 +785,8 @@ export function ZettleBankSidebar({ state, onAnalyze, onApprove }: SidebarProps)
 						</div>
 					)}
 
-					{state.phase === "staging" && (
-						<StagingArea data={state.data} onApprove={onApprove} onReanalyze={onAnalyze} />
+					{state.phase === "results" && (
+						<ResultsPanel data={state.data} onReanalyze={() => onAnalyze()} />
 					)}
 				</>
 			)}

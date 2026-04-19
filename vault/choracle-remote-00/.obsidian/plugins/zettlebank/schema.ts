@@ -137,6 +137,28 @@ export const GenerateArcResponseSchema = z.object({
 export type GenerateArcResponse = z.infer<typeof GenerateArcResponseSchema>;
 
 // ---------------------------------------------------------------------------
+// SyncNoteRequest / SyncNoteResponse — mirrors server.py
+// ---------------------------------------------------------------------------
+
+export const SyncNoteRequestSchema = z.object({
+	note_id:         z.string().min(1).max(128),
+	tags:            z.array(z.string()).default([]),
+	smart_relations: z.array(EdgeMatrixSchema).default([]),
+	community_id:    z.number().int().nullable().default(null),
+});
+export type SyncNoteRequest = z.infer<typeof SyncNoteRequestSchema>;
+
+export const SyncNoteResponseSchema = z.object({
+	note_id:          z.string().min(1),
+	nodes_updated:    z.number().int(),
+	edges_added:      z.number().int(),
+	edges_removed:    z.number().int(),
+	graph_node_count: z.number().int(),
+	graph_edge_count: z.number().int(),
+});
+export type SyncNoteResponse = z.infer<typeof SyncNoteResponseSchema>;
+
+// ---------------------------------------------------------------------------
 // Validation helpers — call at the Client-Server Bridge boundary
 // ---------------------------------------------------------------------------
 
@@ -151,4 +173,8 @@ export function validateAnalyzeResponse(raw: unknown): AnalyzeResponse {
 
 export function validateGenerateArcResponse(raw: unknown): GenerateArcResponse {
 	return GenerateArcResponseSchema.parse(raw);
+}
+
+export function validateSyncNoteResponse(raw: unknown): SyncNoteResponse {
+	return SyncNoteResponseSchema.parse(raw);
 }

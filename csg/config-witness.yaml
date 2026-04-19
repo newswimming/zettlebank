@@ -1,0 +1,41 @@
+project:
+  script_id: "witness-for-the-prosecution"
+  script_path: "screenplays/Witness_For_The_Prosecution.pdf"
+  db_path: "out/witness/graph.db"
+  out_dir: "out/witness/jsonl"
+  graph_html: "out/witness/graph.html"
+
+model:
+  provider: "http"
+  model_name: "qwen2.5:7b"
+  temperature: 0.1
+  max_output_tokens: 2000
+
+http_provider:
+  base_url: "http://localhost:11434/v1"
+  api_key: "ollama"
+  model: "qwen2.5:7b"
+
+extract:
+  min_relation_confidence: 0.5
+  min_interaction_confidence: 0.5
+
+visual:
+  edge_colors:
+    FAMILY: "#ff7f0e"
+    ROMANTIC: "#e41a1c"
+    FRIEND: "#1f77b4"
+    ALLY: "#17becf"
+    BOSS_OF: "#2ca02c"
+    SUBORDINATE_OF: "#98df8a"
+    TEACHER_OF: "#8c564b"
+    STUDENT_OF: "#c49c94"
+    RIVAL: "#9467bd"
+    ENEMY: "#d62728"
+    BETRAYAL: "#e377c2"
+    PROTECTS: "#7f7f7f"
+    BLACKMAILS: "#bcbd22"
+    OWES_DEBT: "#8c6d31"
+    COAUTHOR: "#6baed6"
+    COCONSPIRATOR: "#9edae5"
+    UNKNOWN: "#666666"

@@ -1,0 +1,40 @@
+project:
+  script_id: "dayfly-angel-island"
+  db_path: "out/graph.db"
+  out_dir: "out/jsonl"
+  graph_html: "out/graph.html"
+
+model:
+  provider: "http"              # one of: dummy | openai | azure | http
+  model_name: "qwen2.5:7b"     # used by openai/azure/http
+  temperature: 0.1
+  max_output_tokens: 2000
+
+http_provider:
+  base_url: "http://localhost:11434/v1"  # Ollama OpenAI-compatible endpoint
+  api_key: "ollama"                      # required by Ollama; any non-empty string
+  model: "qwen2.5:7b"
+
+extract:
+  min_relation_confidence: 0.5
+  min_interaction_confidence: 0.5
+
+visual:
+  edge_colors:
+    FAMILY: "#ff7f0e"
+    ROMANTIC: "#e41a1c"
+    FRIEND: "#1f77b4"
+    ALLY: "#17becf"
+    BOSS_OF: "#2ca02c"
+    SUBORDINATE_OF: "#98df8a"
+    TEACHER_OF: "#8c564b"
+    STUDENT_OF: "#c49c94"
+    RIVAL: "#9467bd"
+    ENEMY: "#d62728"
+    BETRAYAL: "#e377c2"
+    PROTECTS: "#7f7f7f"
+    BLACKMAILS: "#bcbd22"
+    OWES_DEBT: "#8c6d31"
+    COAUTHOR: "#6baed6"
+    COCONSPIRATOR: "#9edae5"
+    UNKNOWN: "#666666"

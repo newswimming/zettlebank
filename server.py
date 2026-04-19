@@ -687,6 +687,22 @@ class CharacterGraphIngestResponse(BaseModel):
     edges: int
 
 
+class SyncNoteRequest(BaseModel):
+    note_id: str = Field(..., description="Slugified note filename stem.")
+    tags: list[str] = Field(default_factory=list, description="Current tag list from frontmatter.")
+    smart_relations: list[EdgeMatrix] = Field(default_factory=list, description="Current smart_relations from frontmatter.")
+    community_id: Optional[int] = Field(default=None, description="community_id from frontmatter.")
+
+
+class SyncNoteResponse(BaseModel):
+    note_id: str
+    nodes_updated: int = Field(description="1 if node was updated, 0 if not found in graph.")
+    edges_added: int
+    edges_removed: int
+    graph_node_count: int
+    graph_edge_count: int
+
+
 class CommunityTier(BaseModel):
     """One resolution tier of the Leiden partition."""
     resolution: float
@@ -2878,6 +2894,65 @@ async def ingest_character_graph(req: CharacterGraphIngestRequest):
         files_skipped=files_skipped,
         nodes=graph.number_of_nodes(),
         edges=graph.number_of_edges(),
+    )
+
+
+@app.post("/graph/sync-note", response_model=SyncNoteResponse)
+async def sync_note(req: SyncNoteRequest):
+    """Sync manual frontmatter edits back into the NetworkX graph.
+
+    Called by the Obsidian plugin's vault file watcher when a note is modified.
+    Updates node tags, edges (from smart_relations), and community_id.
+    Does NOT re-run Leiden or BERTopic — those happen on the next /analyze call.
+    """
+    note_id = _slugify(req.note_id)
+
+    # 1. Upsert node and update tags
+    if note_id not in graph:
+        graph.add_node(note_id)
+    _store_node_tags(note_id, req.tags)
+    if req.community_id is not None:
+        graph.nodes[note_id]["community_id"] = req.community_id
+    graph.nodes[note_id]["needs_leiden"] = True
+
+    # 2. Collect existing outgoing edge targets
+    existing_targets: set[str] = set(graph.successors(note_id))
+
+    # 3. Build desired target set from incoming smart_relations
+    desired_targets: set[str] = {rel.target_id for rel in req.smart_relations}
+
+    # 4. Remove edges that are no longer in frontmatter
+    edges_removed = 0
+    for target in existing_targets - desired_targets:
+        if graph.has_edge(note_id, target):
+            graph.remove_edge(note_id, target)
+            edges_removed += 1
+
+    # 5. Upsert new/updated edges
+    edges_added = 0
+    for rel in req.smart_relations:
+        target_id = _slugify(rel.target_id)
+        if target_id not in graph:
+            graph.add_node(target_id)
+        graph.add_edge(
+            note_id,
+            target_id,
+            relation_type=rel.relation_type.value,
+            narrative_act=rel.narrative_act.value,
+            confidence=rel.confidence,
+            provenance=rel.provenance.value,
+        )
+        edges_added += 1
+
+    _save_graph()
+
+    return SyncNoteResponse(
+        note_id=note_id,
+        nodes_updated=1,
+        edges_added=edges_added,
+        edges_removed=edges_removed,
+        graph_node_count=graph.number_of_nodes(),
+        graph_edge_count=graph.number_of_edges(),
     )
 
 

@@ -1,0 +1,8 @@
+PyPDF2>=3.0.0
+PyYAML>=6.0.1
+requests>=2.31.0
+networkx>=3.2.1
+pyvis>=0.3.2
+# If using OpenAI / Azure:
+openai>=1.30.0
+# If you need Final Draft (FDX) parsing only uses Python stdlib xml.etree
