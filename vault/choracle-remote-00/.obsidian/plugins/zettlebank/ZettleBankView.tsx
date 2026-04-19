@@ -1,13 +1,13 @@
 import React, { useState, useEffect, type FC } from "react";
 import type {
 	AnalyzeResponse,
+	ApprovedPayload,
 	EdgeMatrix,
 	NarrativeAudit,
 	RelationType,
 	StructuralHole,
 	CommunityTier,
 } from "./schema";
-import { validateGenerateArcResponse } from "./schema";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -22,6 +22,7 @@ type SidebarState =
 interface SidebarProps {
 	state: SidebarState;
 	onAnalyze: () => void;
+	onApprove: (payload: ApprovedPayload) => Promise<void>;
 	onPush: () => Promise<void>;
 }
 
@@ -76,18 +77,6 @@ const ARC_ACTS: ArcAct[] = ["ki", "sho", "ten", "ketsu"];
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Groups tags by prefix. affect/ is excluded — rendered as ValenceBadge. */
-function groupTagsByPrefix(tags: string[]): Record<string, string[]> {
-	const groups: Record<string, string[]> = { topic: [], aspect: [], code: [] };
-	for (const tag of tags) {
-		const slash = tag.indexOf("/");
-		if (slash === -1) continue;
-		const prefix = tag.slice(0, slash);
-		if (prefix in groups) groups[prefix].push(tag);
-	}
-	return groups;
-}
-
 /** Forward = later in Ki→Shō→Ten→Ketsu. Regression = earlier. Lateral = same. */
 function getMomentumVector(fromAct: string, toAct: string): { arrow: string; label: string } {
 	const from = ACT_ORDER[fromAct] ?? 0;
@@ -125,9 +114,13 @@ const CHIP_STYLE: React.CSSProperties = {
 // ---------------------------------------------------------------------------
 
 const VALENCE_STYLES: Record<string, { color: string; bg: string; label: string }> = {
-	positive: { color: "var(--color-green, #3dba6f)", bg: "rgba(61,186,111,0.12)",  label: "Positive"    },
-	negative: { color: "var(--color-red,  #e05252)",  bg: "rgba(224,82,82,0.12)",   label: "Negative"    },
-	mu:       { color: "var(--text-muted)",            bg: "var(--background-modifier-hover)", label: "Mu (Neutral)" },
+	positive:   { color: "var(--color-green, #3dba6f)", bg: "rgba(61,186,111,0.12)",   label: "Positive"   },
+	negative:   { color: "var(--color-red,  #e05252)",  bg: "rgba(224,82,82,0.12)",    label: "Negative"   },
+	neutral:    { color: "var(--text-muted)",            bg: "var(--background-modifier-hover)", label: "Neutral"    },
+	ambivalent: { color: "#a78bfa",                      bg: "rgba(167,139,250,0.12)",  label: "Ambivalent" },
+	melancholic:{ color: "#60a5fa",                      bg: "rgba(96,165,250,0.12)",   label: "Melancholic"},
+	tense:      { color: "#f59e0b",                      bg: "rgba(245,158,11,0.12)",   label: "Tense"      },
+	hopeful:    { color: "#34d399",                      bg: "rgba(52,211,153,0.12)",   label: "Hopeful"    },
 };
 
 const ValenceBadge: FC<{
@@ -135,7 +128,7 @@ const ValenceBadge: FC<{
 }> = ({ affectTag }) => {
 	if (!affectTag) return null;
 	const value = affectTag.slice("affect/".length);
-	const style = VALENCE_STYLES[value] ?? VALENCE_STYLES["mu"];
+	const style = VALENCE_STYLES[value] ?? VALENCE_STYLES["neutral"];
 	return (
 		<div
 			style={{
@@ -470,220 +463,445 @@ const DescriptionCard: FC<{
 	</div>
 );
 
+
 // ---------------------------------------------------------------------------
-// useHealth — pings /health on mount, surfaces ollama_alive
+// ActMapPanel — act position, structural freedom, relation flow, vault distribution
 // ---------------------------------------------------------------------------
 
-function useHealth(): boolean {
-	const [ollamaAlive, setOllamaAlive] = useState(true);
+const ActMapPanel: FC<{ data: AnalyzeResponse | null }> = ({ data }) => {
+	const [dist, setDist] = useState<{
+		total: number;
+		distribution: Record<string, number>;
+	} | null>(null);
 
 	useEffect(() => {
-		fetch("http://localhost:8000/health", {
-			signal: AbortSignal.timeout(4000),
+		fetch("http://localhost:8000/graph/act-distribution", {
+			signal: AbortSignal.timeout(8000),
 		})
 			.then((r) => r.json())
-			.then((d) => {
-				if (d.ollama_alive === false) setOllamaAlive(false);
-			})
-			.catch(() => {
-				// Server unreachable — leave enabled, generation will surface the error
-			});
+			.then(setDist)
+			.catch(() => {});
 	}, []);
 
-	return ollamaAlive;
-}
+	if (!data) {
+		return (
+			<div className="zettlebank-empty-state">
+				<p>Analyze a note to see its act position in the vault narrative.</p>
+			</div>
+		);
+	}
 
-// ---------------------------------------------------------------------------
-// NarrativeArcPanel — 4-act beat generator
-// ---------------------------------------------------------------------------
+	const act = (data.narrative_act ?? "ki") as ArcAct;
+	const cfg = ARC_CFG[act] ?? ARC_CFG.ki;
+	const freedom = Math.max(0, 1 - data.structural_hole.constraint_score);
+	const freedomPct = (freedom * 100).toFixed(1);
 
-const NarrativeArcPanel: FC<{ ollamaAlive: boolean }> = ({ ollamaAlive }) => {
-	const [beats, setBeats] = useState<Record<ArcAct, string>>({
-		ki: "", sho: "", ten: "", ketsu: "",
-	});
-	const [locked, setLocked] = useState<Record<ArcAct, boolean>>({
-		ki: false, sho: false, ten: false, ketsu: false,
-	});
-	const [loading, setLoading] = useState(false);
-	const [error, setError]     = useState<string | null>(null);
-
-	const toggleLock = (act: ArcAct) => {
-		if (loading) return;
-		setLocked((prev) => ({ ...prev, [act]: !prev[act] }));
-	};
-
-	const generate = async () => {
-		if (!ollamaAlive || loading) return;
-		setLoading(true);
-		setError(null);
-
-		const locked_acts = ARC_ACTS.filter((a) => locked[a]);
-
-		try {
-			const resp = await fetch(
-				"http://localhost:8000/graph/generate-arc",
-				{
-					method: "POST",
-					headers: { "Content-Type": "application/json" },
-					body: JSON.stringify({ locked_acts }),
-					signal: AbortSignal.timeout(180_000),
-				}
-			);
-			if (!resp.ok) throw new Error(`Server error ${resp.status}`);
-			const data = validateGenerateArcResponse(await resp.json());
-
-			setBeats((prev) => ({
-				ki:    locked.ki    ? prev.ki    : data.ki    || prev.ki,
-				sho:   locked.sho   ? prev.sho   : data.sho   || prev.sho,
-				ten:   locked.ten   ? prev.ten   : data.ten   || prev.ten,
-				ketsu: locked.ketsu ? prev.ketsu : data.ketsu || prev.ketsu,
-			}));
-		} catch (e) {
-			setError(e instanceof Error ? e.message : "Generation failed.");
-		} finally {
-			setLoading(false);
-		}
-	};
+	// Count smart_relations by target narrative_act
+	const relsByAct: Record<string, number> = {};
+	for (const rel of data.metadata.smart_relations) {
+		const targetAct = rel.narrative_act ?? "sho";
+		relsByAct[targetAct] = (relsByAct[targetAct] ?? 0) + 1;
+	}
+	const hasRelations = data.metadata.smart_relations.length > 0;
 
 	return (
 		<div className="zettlebank-staging">
-			{ARC_ACTS.map((act) => {
-				const cfg       = ARC_CFG[act];
-				const isLocked  = locked[act];
-				const beat      = beats[act];
-				const isPending = loading && !isLocked;
 
-				return (
-					<div
-						key={act}
-						className="zettlebank-card"
-						onClick={() => toggleLock(act)}
-						style={{
-							cursor:      loading ? "default" : "pointer",
-							borderColor: isLocked ? cfg.color : undefined,
-							boxShadow:   isLocked
-								? `0 0 0 1px ${cfg.color}55, inset 0 0 14px ${cfg.color}0d`
-								: undefined,
-							background:  isLocked ? "var(--background-secondary)" : undefined,
-							transition:  "border-color 0.18s, box-shadow 0.18s, background 0.18s",
-						}}
-					>
-						{/* Block header */}
-						<div style={{ display: "flex", alignItems: "center", gap: "7px", marginBottom: "6px" }}>
-							<span style={{
-								width: 8, height: 8, borderRadius: "50%",
-								background: cfg.color, flexShrink: 0, display: "inline-block",
-							}} />
-							<span style={{
-								flex: 1, fontSize: "11px", fontWeight: 700,
-								color: "var(--text-normal)", letterSpacing: "0.02em",
-							}}>
-								{cfg.label}{" "}
-								<span style={{ color: "var(--text-faint)", fontWeight: 400 }}>
-									{cfg.kanji} · {cfg.sub}
+			{/* 1. Act position hero */}
+			<div
+				className="zettlebank-card"
+				style={{
+					textAlign: "center",
+					borderColor: cfg.color,
+					background: `${cfg.color}10`,
+					padding: "16px 12px",
+				}}
+			>
+				<div style={{ fontSize: "52px", lineHeight: 1.0, marginBottom: "6px" }}>
+					{cfg.kanji}
+				</div>
+				<div style={{ color: cfg.color, fontWeight: 700, fontSize: "13px", letterSpacing: "0.03em" }}>
+					{cfg.label} · {cfg.sub}
+				</div>
+				<div style={{ color: "var(--text-faint)", fontSize: "11px", marginTop: "4px" }}>
+					Community {data.community_id !== null ? `#${data.community_id}` : "—"}
+				</div>
+			</div>
+
+			{/* 2. Structural freedom bar */}
+			<div className="zettlebank-card">
+				<h4 className="zettlebank-card-label">Structural Freedom</h4>
+				<div style={{ display: "flex", justifyContent: "space-between", marginBottom: "3px" }}>
+					<span style={LABEL_STYLE}>Burt Constraint</span>
+					<span style={{
+						fontSize: "var(--font-ui-smaller)",
+						fontWeight: 600,
+						color: data.structural_hole.is_ten_candidate
+							? "var(--text-accent)"
+							: "var(--text-muted)",
+					}}>
+						{freedomPct}% free
+						{data.structural_hole.is_ten_candidate && " · 転 candidate"}
+					</span>
+				</div>
+				<div style={{
+					height: "6px", borderRadius: "3px",
+					background: "var(--background-modifier-border)",
+					overflow: "hidden",
+				}}>
+					<div style={{
+						height: "100%",
+						width: `${freedomPct}%`,
+						borderRadius: "3px",
+						background: data.structural_hole.is_ten_candidate
+							? "var(--text-accent)"
+							: cfg.color,
+						transition: "width 0.3s ease",
+					}} />
+				</div>
+				<div style={{ display: "flex", justifyContent: "space-between", marginTop: "2px" }}>
+					<span style={{ fontSize: "10px", color: "var(--text-faint)" }}>Constrained</span>
+					<span style={{ fontSize: "10px", color: "var(--text-faint)" }}>Free Bridge</span>
+				</div>
+			</div>
+
+			{/* 3. Relation flow across acts */}
+			{hasRelations && (
+				<div className="zettlebank-card">
+					<h4 className="zettlebank-card-label">Relation Flow</h4>
+					{ARC_ACTS.map((targetAct) => {
+						const count = relsByAct[targetAct] ?? 0;
+						if (count === 0) return null;
+						const targetCfg = ARC_CFG[targetAct];
+						const momentum  = getMomentumVector(act, targetAct);
+						return (
+							<div
+								key={targetAct}
+								style={{
+									display: "flex", alignItems: "center",
+									gap: "6px", marginBottom: "5px", fontSize: "12px",
+								}}
+							>
+								<span style={{
+									fontFamily: "var(--font-monospace)",
+									color: cfg.color, fontWeight: 700,
+								}}>
+									{cfg.kanji}
 								</span>
-							</span>
-							<span style={{ fontSize: "11px", opacity: 0.75 }}>
-								{isLocked ? "🔒" : "🔓"}
-							</span>
-						</div>
-
-						{/* Beat text */}
-						<p style={{
-							fontSize: "11px", lineHeight: 1.6, margin: 0, paddingLeft: "15px",
-							color:     beat ? "var(--text-muted)" : "var(--text-faint)",
-							fontStyle: beat ? "normal" : "italic",
-							opacity:   isPending ? 0.4 : 1,
-							transition: "opacity 0.2s",
-						}}>
-							{isPending ? "· · ·" : beat || "Click generate to draft..."}
-						</p>
-					</div>
-				);
-			})}
-
-			{error && (
-				<div className="zettlebank-error" style={{ marginBottom: "8px" }}>
-					<p>{error}</p>
+								<span style={{ color: "var(--text-accent)", fontWeight: 600 }}>
+									{momentum.arrow}
+								</span>
+								<span style={{
+									fontFamily: "var(--font-monospace)",
+									color: targetCfg.color, fontWeight: 700,
+								}}>
+									{targetCfg.kanji}
+								</span>
+								<span style={{ color: "var(--text-faint)", fontSize: "11px" }}>
+									{count} {count === 1 ? "relation" : "relations"} · {momentum.label}
+								</span>
+							</div>
+						);
+					})}
 				</div>
 			)}
 
-			<div className="zettlebank-actions">
-				<button
-					className="zettlebank-btn-approve"
-					onClick={generate}
-					disabled={!ollamaAlive || loading}
-					type="button"
-					style={{ width: "100%" }}
-				>
-					{loading ? "Drafting..." : "Generate Arc"}
-				</button>
-			</div>
+			{/* 4. Vault act distribution */}
+			{dist && dist.total > 0 && (
+				<div className="zettlebank-card">
+					<h4 className="zettlebank-card-label">
+						Vault Distribution ({dist.total} notes)
+					</h4>
+					{/* Stacked proportional bar */}
+					<div style={{
+						display: "flex", height: "10px", borderRadius: "3px",
+						overflow: "hidden", marginBottom: "6px",
+					}}>
+						{ARC_ACTS.map((a) => {
+							const count = dist.distribution[a] ?? 0;
+							return (
+								<div
+									key={a}
+									title={`${ARC_CFG[a].label}: ${count} of ${dist.total}`}
+									style={{
+										flex: count,
+										background: ARC_CFG[a].color,
+										minWidth: count > 0 ? 3 : 0,
+									}}
+								/>
+							);
+						})}
+					</div>
+					{/* Legend */}
+					<div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+						{ARC_ACTS.map((a) => {
+							const count = dist.distribution[a] ?? 0;
+							const pct   = ((count / dist.total) * 100).toFixed(0);
+							const c     = ARC_CFG[a];
+							const isCurrent = a === act;
+							return (
+								<span
+									key={a}
+									style={{
+										display: "flex", alignItems: "center",
+										gap: "3px", fontSize: "11px",
+										fontWeight: isCurrent ? 700 : 400,
+									}}
+								>
+									<span style={{
+										width: "7px", height: "7px", borderRadius: "50%",
+										background: c.color, display: "inline-block",
+										outline: isCurrent ? `2px solid ${c.color}` : "none",
+										outlineOffset: "1px",
+									}} />
+									<span style={{
+										color: isCurrent
+											? "var(--text-normal)"
+											: "var(--text-muted)",
+									}}>
+										{c.kanji} {count} ({pct}%)
+									</span>
+								</span>
+							);
+						})}
+					</div>
+				</div>
+			)}
 		</div>
 	);
 };
 
 // ---------------------------------------------------------------------------
-// Results Panel  (shown after auto-approve write)
+// Results Panel — editable staging area; writes to frontmatter on approve
 // ---------------------------------------------------------------------------
 
 const ResultsPanel: React.FC<{
 	data: AnalyzeResponse;
-	onPush: () => Promise<void>;
-}> = ({ data, onPush }) => {
-	const [pushing, setPushing] = useState(false);
-	const affectTag = data.metadata.tags.find((t) => t.startsWith("affect/"));
+	onApprove: (payload: ApprovedPayload) => Promise<void>;
+}> = ({ data, onApprove }) => {
+
+	// ── Affect ───────────────────────────────────────────────────────────
+	const initialAffect = (
+		data.metadata.tags.find((t) => t.startsWith("affect/")) ?? "affect/neutral"
+	).slice("affect/".length);
+	const [affect, setAffect] = useState(initialAffect);
+
+	// ── Tags (non-affect) — all accepted by default ───────────────────────
+	const nonAffectTags = data.metadata.tags.filter((t) => !t.startsWith("affect/"));
+	const [acceptedTags, setAcceptedTags] = useState<Set<string>>(
+		() => new Set(nonAffectTags)
+	);
+
+	// ── Description ───────────────────────────────────────────────────────
+	const [description, setDescription] = useState(data.metadata.description ?? "");
+
+	// ── Relations keyed by target_id::relation_type ───────────────────────
+	const [relAccepted, setRelAccepted] = useState<Set<string>>(
+		() => new Set(data.metadata.smart_relations.map((r) => `${r.target_id}::${r.relation_type}`))
+	);
+	const [relTargets, setRelTargets] = useState<Map<string, string>>(() => {
+		const m = new Map<string, string>();
+		for (const r of data.metadata.smart_relations) {
+			m.set(`${r.target_id}::${r.relation_type}`, r.target_id);
+		}
+		return m;
+	});
+
+	// ── Community members ─────────────────────────────────────────────────
+	const [communityMembers, setCommunityMembers] = useState<string[] | null>(null);
+	useEffect(() => {
+		if (data.community_id === null) return;
+		fetch(`http://localhost:8000/graph/community/${data.community_id}/members`, {
+			signal: AbortSignal.timeout(6000),
+		})
+			.then((r) => r.json())
+			.then((d) => setCommunityMembers(
+				(d.members as string[]).filter((id) => id !== data.note_id)
+			))
+			.catch(() => {});
+	}, [data.community_id, data.note_id]);
+
+	// ── Action state ──────────────────────────────────────────────────────
+	const [approving, setApproving] = useState(false);
+	const [saved, setSaved]         = useState(false);
+
+	// ── Handlers ──────────────────────────────────────────────────────────
+	const toggleTag = (tag: string) => {
+		setAcceptedTags((prev) => {
+			const next = new Set(prev);
+			if (next.has(tag)) next.delete(tag); else next.add(tag);
+			return next;
+		});
+		setSaved(false);
+	};
+
+	const toggleRel = (key: string) => {
+		setRelAccepted((prev) => {
+			const next = new Set(prev);
+			if (next.has(key)) next.delete(key); else next.add(key);
+			return next;
+		});
+		setSaved(false);
+	};
+
+	const setRelTarget = (key: string, next: string) => {
+		setRelTargets((prev) => new Map(prev).set(key, next));
+		setSaved(false);
+	};
+
+	const handleApprove = async () => {
+		setApproving(true);
+		try {
+			const approvedTags = nonAffectTags
+				.filter((t) => acceptedTags.has(t))
+				.concat([`affect/${affect}`]);
+
+			const approvedRels = data.metadata.smart_relations
+				.filter((r) => relAccepted.has(`${r.target_id}::${r.relation_type}`))
+				.map((r) => ({
+					...r,
+					target_id: relTargets.get(`${r.target_id}::${r.relation_type}`) ?? r.target_id,
+				}));
+
+			await onApprove({
+				metadata: {
+					...data.metadata,
+					tags:            approvedTags,
+					smart_relations: approvedRels,
+					description:     description.trim() || null,
+				},
+				community_id: data.community_id,
+			});
+
+			setSaved(true);
+			setTimeout(() => setSaved(false), 2500);
+		} finally {
+			setApproving(false);
+		}
+	};
 
 	return (
 		<div className="zettlebank-staging">
-			{affectTag && <ValenceBadge affectTag={affectTag} />}
 
+			{/* ── Emotional Valence selector ─────────────────────────── */}
 			<div className="zettlebank-card">
-				<h4 className="zettlebank-card-label">community</h4>
-				<span className="zettlebank-chip">
-					{data.community_id !== null ? `#${data.community_id}` : "—"}
-				</span>
-			</div>
-
-			<div className="zettlebank-card">
-				<h4 className="zettlebank-card-label">tags</h4>
-				<div className="zettlebank-chip-row">
-					{data.metadata.tags
-						.filter((t) => !t.startsWith("affect/"))
-						.map((t) => (
-							<span key={t} className="zettlebank-chip">{t}</span>
-						))}
+				<h4 className="zettlebank-card-label">Emotional Valence</h4>
+				<div style={{ display: "flex", flexWrap: "wrap", gap: "4px", marginTop: "6px" }}>
+					{Object.entries(VALENCE_STYLES).map(([key, vs]) => {
+						const active = affect === key;
+						return (
+							<button
+								key={key}
+								type="button"
+								onClick={() => { setAffect(key); setSaved(false); }}
+								style={{
+									padding: "2px 10px",
+									borderRadius: "var(--radius-s)",
+									border: `1px solid ${active ? vs.color : "var(--background-modifier-border)"}`,
+									background: active ? vs.bg : "transparent",
+									color: active ? vs.color : "var(--text-faint)",
+									fontSize: "var(--font-ui-smaller)",
+									fontWeight: active ? 600 : 400,
+									cursor: "pointer",
+									transition: "all 0.15s",
+								}}
+							>
+								{vs.label}
+							</button>
+						);
+					})}
 				</div>
 			</div>
 
+			{/* ── Description ───────────────────────────────────────── */}
+			<DescriptionCard
+				value={description}
+				onChange={(v) => { setDescription(v); setSaved(false); }}
+			/>
+
+			{/* ── Community members ─────────────────────────────────── */}
 			<div className="zettlebank-card">
-				<h4 className="zettlebank-card-label">smart_relations</h4>
-				{data.metadata.smart_relations.length > 0 ? (
-					<div className="zettlebank-relation-list">
-						{data.metadata.smart_relations.map((rel) => (
-							<div key={`${rel.target_id}::${rel.relation_type}`} className="zettlebank-relation-row">
-								<span className="zettlebank-rel-type">{rel.relation_type}</span>
-								<span className="zettlebank-rel-arrow">→</span>
-								<span className="zettlebank-rel-target">{rel.target_id}</span>
-								<span className="zettlebank-rel-conf">
-									{(rel.confidence * 100).toFixed(0)}%
-								</span>
-							</div>
+				<h4 className="zettlebank-card-label">
+					Community {data.community_id !== null ? `#${data.community_id}` : "—"}
+				</h4>
+				{communityMembers === null && data.community_id !== null && (
+					<span style={{ fontSize: "var(--font-ui-smaller)", color: "var(--text-faint)" }}>
+						Loading members…
+					</span>
+				)}
+				{communityMembers !== null && communityMembers.length === 0 && (
+					<span className="zettlebank-empty">No other notes in this community</span>
+				)}
+				{communityMembers !== null && communityMembers.length > 0 && (
+					<div style={{ display: "flex", flexDirection: "column", gap: "2px", marginTop: "4px" }}>
+						{communityMembers.map((id) => (
+							<span
+								key={id}
+								style={{
+									fontFamily: "var(--font-monospace)",
+									fontSize: "var(--font-ui-smaller)",
+									color: "var(--text-muted)",
+									whiteSpace: "nowrap",
+									overflow: "hidden",
+									textOverflow: "ellipsis",
+								}}
+								title={id}
+							>
+								{id}
+							</span>
 						))}
 					</div>
-				) : (
-					<span className="zettlebank-empty">No relations detected</span>
 				)}
 			</div>
 
-			<div className="zettlebank-actions">
+			{/* ── Tags by prefix (click to toggle) ──────────────────── */}
+			{(["topic", "character", "place", "time", "object"] as const).map((prefix) => {
+				const group = nonAffectTags.filter((t) => t.startsWith(prefix + "/"));
+				if (group.length === 0) return null;
+				return (
+					<TagGroupCard
+						key={prefix}
+						prefix={prefix}
+						tags={group}
+						accepted={acceptedTags}
+						onToggle={toggleTag}
+					/>
+				);
+			})}
+
+			{/* ── Relations (click header to accept/reject) ─────────── */}
+			{data.metadata.smart_relations.length > 0 && (
+				<div className="zettlebank-card">
+					<h4 className="zettlebank-card-label">smart_relations</h4>
+					<div style={{ display: "flex", flexDirection: "column", gap: "6px", marginTop: "4px" }}>
+						{data.metadata.smart_relations.map((rel) => {
+							const key = `${rel.target_id}::${rel.relation_type}`;
+							return (
+								<RelationCard
+									key={key}
+									rel={rel}
+									currentAct={data.narrative_act}
+									accepted={relAccepted.has(key)}
+									editedTargetId={relTargets.get(key) ?? rel.target_id}
+									onToggle={() => toggleRel(key)}
+									onTargetChange={(next) => setRelTarget(key, next)}
+								/>
+							);
+						})}
+					</div>
+				</div>
+			)}
+
+			{/* ── Actions ───────────────────────────────────────────── */}
+			<div style={{ padding: "0 0 8px" }}>
 				<button
 					className="zettlebank-btn-approve"
-					onClick={async () => { setPushing(true); try { await onPush(); } finally { setPushing(false); } }}
-					disabled={pushing}
+					onClick={handleApprove}
+					disabled={approving}
 					type="button"
+					style={{ width: "100%" }}
 				>
-					{pushing ? "Pushing…" : "Push to Graph"}
+					{approving ? "Pushing…" : saved ? "Pushed!" : "Push to Graph"}
 				</button>
 			</div>
 		</div>
@@ -694,11 +912,10 @@ const ResultsPanel: React.FC<{
 // Root sidebar
 // ---------------------------------------------------------------------------
 
-export function ZettleBankSidebar({ state, onAnalyze, onPush }: SidebarProps) {
-	const ollamaAlive = useHealth();
-	const [activeTab, setActiveTab] = useState<"analysis" | "arc">("analysis");
+export function ZettleBankSidebar({ state, onAnalyze, onApprove, onPush }: SidebarProps) {
+	const [activeTab, setActiveTab] = useState<"analysis" | "map">("analysis");
 
-	const tabStyle = (tab: "analysis" | "arc"): React.CSSProperties => ({
+	const tabStyle = (tab: "analysis" | "map"): React.CSSProperties => ({
 		flex: 1,
 		padding: "8px 0",
 		background: "none",
@@ -741,30 +958,10 @@ export function ZettleBankSidebar({ state, onAnalyze, onPush }: SidebarProps) {
 				<button type="button" onClick={() => setActiveTab("analysis")} style={tabStyle("analysis")}>
 					Analysis
 				</button>
-				<button type="button" onClick={() => setActiveTab("arc")} style={tabStyle("arc")}>
-					Arc Generator
+				<button type="button" onClick={() => setActiveTab("map")} style={tabStyle("map")}>
+					Act Map
 				</button>
 			</div>
-
-			{/* Ollama offline warning */}
-			{!ollamaAlive && (
-				<div style={{
-					margin: "8px 12px 0",
-					padding: "7px 9px",
-					background: "var(--background-modifier-error)",
-					border: "1px solid var(--text-error)",
-					borderRadius: "5px",
-					fontSize: "11px",
-					color: "var(--text-error)",
-					display: "flex",
-					gap: "5px",
-					alignItems: "flex-start",
-					lineHeight: 1.5,
-				}}>
-					<span style={{ flexShrink: 0 }}>⚠️</span>
-					<span>Ollama is offline. Arc generation is disabled.</span>
-				</div>
-			)}
 
 			{/* Tab content */}
 			{activeTab === "analysis" && (
@@ -789,13 +986,13 @@ export function ZettleBankSidebar({ state, onAnalyze, onPush }: SidebarProps) {
 					)}
 
 					{state.phase === "results" && (
-						<ResultsPanel data={state.data} onPush={onPush} />
+						<ResultsPanel data={state.data} onApprove={onApprove} />
 					)}
 				</>
 			)}
 
-			{activeTab === "arc" && (
-				<NarrativeArcPanel ollamaAlive={ollamaAlive} />
+			{activeTab === "map" && (
+				<ActMapPanel data={state.phase === "results" ? state.data : null} />
 			)}
 		</div>
 	);

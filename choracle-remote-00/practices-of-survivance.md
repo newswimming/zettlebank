@@ -6,8 +6,57 @@ last updated:
 tags:
   - hope
   - qi
+  - topic/Indigenous_Knowledge_Preservation
+  - aspect/character/citationid
+  - aspect/character/boy-scouts
+  - aspect/time/2026-02-10
+  - affect/mu
+  - code/ten-9
 source:
 citationID: vizenorNativeLibertyNatural2009a
+smart_relations:
+  - target_id: rituals-of-reproduction
+    relation_type: supports
+    narrative_act: sho
+    confidence: 0.705
+    provenance: sc_embedding
+  - target_id: amok-rahman
+    relation_type: supports
+    narrative_act: ketsu
+    confidence: 0.698
+    provenance: sc_embedding
+  - target_id: Indigenous Futurisms as Planetary Assemblage
+    relation_type: potential_to
+    narrative_act: ketsu
+    confidence: 0.68
+    provenance: sc_embedding
+  - target_id: asian-diasporic-arts
+    relation_type: potential_to
+    narrative_act: sho
+    confidence: 0.679
+    provenance: sc_embedding
+  - target_id: unhomely-and-ai
+    relation_type: supports
+    narrative_act: ketsu
+    confidence: 0.677
+    provenance: sc_embedding
+  - target_id: rituals-embody-political-violence
+    relation_type: supports
+    narrative_act: ki
+    confidence: 0.66
+    provenance: sc_embedding
+  - target_id: japanese-vernacular
+    relation_type: potential_to
+    narrative_act: ten
+    confidence: 0.562
+    provenance: sc_embedding
+  - target_id: transmedia-and-folklore
+    relation_type: supports
+    narrative_act: ketsu
+    confidence: 0.671
+    provenance: sc_embedding
+community_id: 2
+updated: 2026-04-19T04:15:11.366Z
 ---
 
 The distinctive "aesthetics" of survivance is that "aural sense of presence"

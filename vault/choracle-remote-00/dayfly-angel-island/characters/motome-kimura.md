@@ -1,5 +1,9 @@
 ---
 tags:
+  - aspect/character/motome-kimura
+  - aspect/character/kimura
+  - aspect/character/naomi
+  - aspect/place/yamaguchi
 smart_relations: []
 community_id: 48
 updated: 2026-03-08T05:43:52.183Z

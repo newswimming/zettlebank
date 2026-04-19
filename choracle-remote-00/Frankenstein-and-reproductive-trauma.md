@@ -1,3 +1,55 @@
+---
+tags:
+  - topic/Indigenous_Knowledge_Systems
+  - aspect/character/mary-shelley
+  - aspect/character/frankenstein
+  - aspect/character/shelley
+  - affect/negative
+  - code/ten-9
+smart_relations:
+  - target_id: rituals-embody-political-violence
+    relation_type: potential_to
+    narrative_act: ki
+    confidence: 0.6
+    provenance: wikilink
+  - target_id: japanese-immigrants-in-california
+    relation_type: potential_to
+    narrative_act: ten
+    confidence: 0.6
+    provenance: wikilink
+  - target_id: 1970s-korean-science-fiction
+    relation_type: potential_to
+    narrative_act: ki
+    confidence: 0.6
+    provenance: wikilink
+  - target_id: indigenous-futurisms-as-planetary-assemblage
+    relation_type: supports
+    narrative_act: ki
+    confidence: 0.6
+    provenance: wikilink
+  - target_id: shonien-hospital-los-angeles
+    relation_type: potential_to
+    narrative_act: ki
+    confidence: 0.6
+    provenance: wikilink
+  - target_id: unhomely-and-ai
+    relation_type: motivates
+    narrative_act: sho
+    confidence: 0.3
+    provenance: wikilink
+  - target_id: los-angeles-womens-organizations
+    relation_type: contradicts
+    narrative_act: ten
+    confidence: 0.3
+    provenance: wikilink
+  - target_id: third-world-solidarity-to-intersectional-feminism
+    relation_type: supports
+    narrative_act: ketsu
+    confidence: 0.3
+    provenance: wikilink
+community_id: 0
+updated: 2026-04-19T04:14:31.178Z
+---
 
 Frankenstein - Mary Shelley - as a story that begins with reproductive trauma 
 at the heart of the book is Dr. Frankenstein’s fatal dalliance with reproductive power

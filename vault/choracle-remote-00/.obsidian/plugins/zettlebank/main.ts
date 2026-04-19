@@ -18,6 +18,7 @@ import {
 	type AnalyzeResponse,
 	type NarrativeMetadata,
 	type EdgeMatrix,
+	type ApprovedPayload,
 } from "./schema";
 
 // ---------------------------------------------------------------------------
@@ -123,11 +124,6 @@ async function analyzeNote(
 //
 // This is ONLY called after user approval — never on raw backend output.
 // ---------------------------------------------------------------------------
-
-export interface ApprovedPayload {
-	metadata: NarrativeMetadata;
-	community_id: number | null;
-}
 
 /**
  * Merges an approved payload into the note's frontmatter via Obsidian's
@@ -273,6 +269,7 @@ class ZettleBankView extends ItemView {
 				createElement(ZettleBankSidebar, {
 					state: this.state,
 					onAnalyze: () => this.plugin.analyzeActiveNote(),
+					onApprove: (payload: ApprovedPayload) => this.plugin.approveNote(payload),
 					onPush: () => this.plugin.pushActiveNote(),
 				})
 			)
@@ -507,6 +504,47 @@ export default class ZettleBankPlugin extends Plugin {
 			}
 		} catch (err) {
 			console.warn("[ZettleBank] auto-analysis failed:", file.path, err);
+		}
+	}
+
+	/**
+	 * Writes the user-approved payload to frontmatter (exact write, not merge)
+	 * then syncs the result to the NetworkX graph.
+	 * Called from the sidebar Approve & Save button.
+	 */
+	async approveNote(payload: ApprovedPayload): Promise<void> {
+		const file = this.app.workspace.getActiveFile();
+		if (!file) return;
+
+		this._suppressSyncFor(file.path);
+
+		this.app.fileManager.processFrontMatter(file, (fm) => {
+			// Exact write — user explicitly chose this tag set
+			fm.tags            = payload.metadata.tags;
+			fm.smart_relations = payload.metadata.smart_relations;
+
+			if (payload.metadata.description !== null) {
+				fm.description = payload.metadata.description;
+			}
+			if (payload.metadata.aliases !== null) {
+				fm.aliases = payload.metadata.aliases;
+			}
+			if (payload.metadata.source !== null) {
+				fm.source = payload.metadata.source;
+			}
+			if (payload.metadata.citationID !== null) {
+				fm.citationID = payload.metadata.citationID;
+			}
+			if (payload.community_id !== null) {
+				fm.community_id = payload.community_id;
+			}
+			fm.updated = new Date().toISOString();
+		});
+
+		try {
+			await syncNoteToGraph(this.app, file, this.settings.backendUrl);
+		} catch (err) {
+			console.warn("[ZettleBank] sync after approve failed:", err);
 		}
 	}
 

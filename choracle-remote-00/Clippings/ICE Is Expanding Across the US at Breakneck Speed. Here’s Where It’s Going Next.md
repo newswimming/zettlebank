@@ -1,13 +1,66 @@
 ---
-title: "ICE Is Expanding Across the US at Breakneck Speed. Here’s Where It’s Going Next"
-source: "https://www.wired.com/story/ice-expansion-across-us-at-heres-where-its-going-next/?utm_source=firefox-newtab-en-us"
+title: ICE Is Expanding Across the US at Breakneck Speed. Here’s Where It’s Going Next
+source: https://www.wired.com/story/ice-expansion-across-us-at-heres-where-its-going-next/?utm_source=firefox-newtab-en-us
 author:
   - "[[Leah Feiger]]"
 published: 2026-02-10
 created: 2026-02-10
-description: "ICE plans to lease offices throughout the US as part of a secret, monthslong expansion campaign. WIRED is publishing dozens of these locations."
+description: ICE plans to lease offices throughout the US as part of a secret, monthslong expansion campaign. WIRED is publishing dozens of these locations.
 tags:
-  - "clippings"
+  - clippings
+  - topic/Indigenous_Knowledge_Systems
+  - aspect/character/gsa
+  - aspect/character/opla
+  - aspect/character/dhs
+  - aspect/object/leah-feiger
+  - aspect/object/the-oakbrook-gateway
+  - aspect/place/us
+  - aspect/place/new-york
+  - aspect/place/california
+  - aspect/time/september
+smart_relations:
+  - target_id: amok-rahman
+    relation_type: potential_to
+    narrative_act: ki
+    confidence: 0.6
+    provenance: wikilink
+  - target_id: asian-diasporic-arts
+    relation_type: potential_to
+    narrative_act: ketsu
+    confidence: 0.6
+    provenance: wikilink
+  - target_id: rituals-embody-political-violence
+    relation_type: potential_to
+    narrative_act: ki
+    confidence: 0.6
+    provenance: wikilink
+  - target_id: amok-and-indigenous-violence
+    relation_type: potential_to
+    narrative_act: sho
+    confidence: 0.6
+    provenance: wikilink
+  - target_id: 1970s-korean-science-fiction
+    relation_type: potential_to
+    narrative_act: ki
+    confidence: 0.6
+    provenance: wikilink
+  - target_id: unhomely-and-ai
+    relation_type: motivates
+    narrative_act: sho
+    confidence: 0.3
+    provenance: wikilink
+  - target_id: japanese-immigrants-in-california
+    relation_type: contradicts
+    narrative_act: ten
+    confidence: 0.3
+    provenance: wikilink
+  - target_id: third-world-solidarity-to-intersectional-feminism
+    relation_type: supports
+    narrative_act: ketsu
+    confidence: 0.3
+    provenance: wikilink
+community_id: 0
+updated: 2026-04-19T04:14:35.439Z
 ---
 Federal records obtained by WIRED show that over the past several months, Immigration and Customs Enforcement ([ICE](https://www.wired.com/story/inside-the-ice-forum-where-agents-complain-about-their-jobs/)) and the Department of Homeland Security ([DHS](https://www.wired.com/story/cbp-ice-dhs-mobile-fortify-face-recognition-verify-identity/)) have carried out a secret campaign to expand ICE’s physical presence across the US. Documents show that more than 150 leases and office expansions have or would place new facilities in nearly every state, many of them in or just outside of the country’s largest metropolitan areas. In many cases, these facilities, which are to be used by [street-level agents and ICE attorneys](https://www.wired.com/story/hundreds-of-google-employees-demand-answers-from-executives-about-ice/), are located near elementary schools, medical offices, places of worship, and other sensitive locations.
 

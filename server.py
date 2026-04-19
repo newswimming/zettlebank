@@ -2544,6 +2544,14 @@ async def get_communities(resolution: float = 1.0):
     return {"resolution": resolution, "communities": communities}
 
 
+@app.get("/graph/community/{community_id}/members")
+async def get_community_members(community_id: int):
+    """Return all note IDs that belong to a given macro community."""
+    macro, _ = _detect_macro()
+    members = [nid for nid, cid in macro.items() if cid == community_id]
+    return {"community_id": community_id, "members": sorted(members)}
+
+
 @app.get("/graph/communities/multi")
 async def get_multi_communities():
     """Return community assignments at both macro (γ=0.5) and micro (γ=2.0)."""
@@ -3231,3 +3239,27 @@ def export_hydrated():
     ]
 
     return JSONResponse(content=_sanitize({"nodes": nodes, "links": links}))
+
+
+@app.get("/graph/act-distribution")
+async def act_distribution():
+    """Return per-act note count across the vault graph.
+
+    Runs macro Leiden and act assignment, returns the distribution of
+    graph nodes across the four Kishōtenketsu acts (Ki/Shō/Ten/Ketsu).
+    Lightweight — no Ollama call required.
+    """
+    if graph.number_of_nodes() == 0:
+        return {"total": 0, "distribution": {"ki": 0, "sho": 0, "ten": 0, "ketsu": 0}}
+
+    macro, _ = _detect_macro()
+    constraint_map = _build_constraint_map()
+    node_tags = _get_all_node_tags()
+    community_act_map = _assign_macro_acts(macro, graph, constraint_map, node_tags)
+
+    distribution: dict[str, int] = {"ki": 0, "sho": 0, "ten": 0, "ketsu": 0}
+    for nid, cid in macro.items():
+        act = community_act_map.get(cid, "sho")
+        distribution[act] = distribution.get(act, 0) + 1
+
+    return {"total": graph.number_of_nodes(), "distribution": distribution}

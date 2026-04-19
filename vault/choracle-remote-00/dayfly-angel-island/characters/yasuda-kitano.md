@@ -1,7 +1,7 @@
 ---
 tags:
-  - topic/factory_umeya_yasuda
-  - topic/japanese_japan_war
+  - topic/Yasuda_Factory_Downturn
+  - topic/Japanese_Immigrant_Life
   - aspect/character/yasuda
   - aspect/character/yasuda-kitano
   - aspect/character/christian
@@ -10,6 +10,8 @@ tags:
   - aspect/place/weller-street
   - aspect/time/1904
   - aspect/time/25-years-old
+  - topic/Yasuda_Factory_Dilemma
+  - topic/Japanese_Immigrant_Struggle
 smart_relations:
   - target_id: motome-kimura
     relation_type: supports
@@ -36,15 +38,30 @@ smart_relations:
     narrative_act: ten
     confidence: 0.652
     provenance: sc_embedding
-  - target_id: 1970s-korean-science-fiction
+  - target_id: japanese-vernacular
     relation_type: contradicts
     narrative_act: ki
-    confidence: 0.541
+    confidence: 0.608
     provenance: sc_embedding
-  - target_id: Oto-Hameda
+  - target_id: indigenous-models
     relation_type: related
     narrative_act: sho
-    confidence: 0.643
+    confidence: 0.569
+    provenance: sc_embedding
+  - target_id: queer-archive-fabulation
+    relation_type: kinetic_to
+    narrative_act: ketsu
+    confidence: 0.586
+    provenance: sc_embedding
+  - target_id: queer-archive-fabulation
+    relation_type: contradicts
+    narrative_act: ki
+    confidence: 0.586
+    provenance: sc_embedding
+  - target_id: 1970s-korean-science-fiction
+    relation_type: related
+    narrative_act: sho
+    confidence: 0.541
     provenance: sc_embedding
   - target_id: indigenous-models
     relation_type: kinetic_to
@@ -52,7 +69,7 @@ smart_relations:
     confidence: 0.569
     provenance: sc_embedding
 community_id: 2
-updated: 2026-04-19T04:05:08.437Z
+updated: 2026-04-19T04:38:57.431Z
 ---
 
 Yasuda Kitano first emigrated to California in 1904, when he was 25-years-old. He worked at the train stations and eventually found a position as a janitor at the Christian mission schools. 

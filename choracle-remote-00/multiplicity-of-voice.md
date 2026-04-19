@@ -4,8 +4,57 @@ description:
 note created: 2026-02-05
 last updated:
 tags:
+  - topic/Minoritarian_Discourse
+  - aspect/character/citationid
+  - aspect/character/deleuze
+  - aspect/time/2026-02-05
+  - affect/mu
+  - code/ten-9
 source:
 citationID: bordeleauNocturnalFabulationsEcology2017
+smart_relations:
+  - target_id: spiritual-kin-and-special-networks
+    relation_type: supports
+    narrative_act: ketsu
+    confidence: 0.701
+    provenance: sc_embedding
+  - target_id: third-space-of-ennunciation
+    relation_type: supports
+    narrative_act: ketsu
+    confidence: 0.696
+    provenance: sc_embedding
+  - target_id: third-world-solidarity-to-intersectional-feminism
+    relation_type: potential_to
+    narrative_act: ki
+    confidence: 0.693
+    provenance: sc_embedding
+  - target_id: the-practice-of-sentience
+    relation_type: potential_to
+    narrative_act: ketsu
+    confidence: 0.666
+    provenance: sc_embedding
+  - target_id: third-space-as-liminality
+    relation_type: potential_to
+    narrative_act: ketsu
+    confidence: 0.664
+    provenance: sc_embedding
+  - target_id: amok-rahman
+    relation_type: supports
+    narrative_act: ki
+    confidence: 0.647
+    provenance: sc_embedding
+  - target_id: rituals-of-reproduction
+    relation_type: related
+    narrative_act: sho
+    confidence: 0.637
+    provenance: sc_embedding
+  - target_id: LAPDCharacterWorkshop2026
+    relation_type: related
+    narrative_act: ten
+    confidence: 0.636
+    provenance: sc_embedding
+community_id: 1
+updated: 2026-04-19T04:15:04.488Z
 ---
 
 "a conversation to come" is one that invents interlocutors, one that refuses to know in advance where the encounter will lead. Deleuze calls this a minoritarian discourse: 'We must catch someone fabulating, catch them 'in the act' of fabulating. Then a minoritarian discourse, with two or many speakers, takes shape... To catch fabulation in the act is to seize the movement of the constitution of people. A people never preexists"

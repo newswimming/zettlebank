@@ -178,3 +178,12 @@ export function validateGenerateArcResponse(raw: unknown): GenerateArcResponse {
 export function validateSyncNoteResponse(raw: unknown): SyncNoteResponse {
 	return SyncNoteResponseSchema.parse(raw);
 }
+
+// ---------------------------------------------------------------------------
+// ApprovedPayload — data assembled by the sidebar after user editing
+// ---------------------------------------------------------------------------
+
+export interface ApprovedPayload {
+	metadata: NarrativeMetadata;
+	community_id: number | null;
+}

@@ -1,3 +1,59 @@
+---
+tags:
+  - topic/unassigned
+  - aspect/character/bhabha
+  - aspect/character/chinese
+  - aspect/character/sf
+  - aspect/object/the-intermediary
+  - aspect/place/sf
+  - aspect/place/east-asia
+  - aspect/time/taylor-2003
+  - affect/mu
+  - code/ten-9
+smart_relations:
+  - target_id: park-sunyoung-2020
+    relation_type: potential_to
+    narrative_act: sho
+    confidence: 0.7
+    provenance: wikilink
+  - target_id: taylor-2003-mestizaje
+    relation_type: potential_to
+    narrative_act: sho
+    confidence: 0.7
+    provenance: wikilink
+  - target_id: diawara-2010-documentary
+    relation_type: potential_to
+    narrative_act: sho
+    confidence: 0.7
+    provenance: wikilink
+  - target_id: no-tech-for-apartheid
+    relation_type: potential_to
+    narrative_act: sho
+    confidence: 0.7
+    provenance: wikilink
+  - target_id: military-origins-of-computer-graphics
+    relation_type: potential_to
+    narrative_act: sho
+    confidence: 0.7
+    provenance: wikilink
+  - target_id: rituals-embody-political-violence
+    relation_type: supports
+    narrative_act: ki
+    confidence: 0.3
+    provenance: wikilink
+  - target_id: japanese-immigrants-in-california
+    relation_type: potential_to
+    narrative_act: ten
+    confidence: 0.3
+    provenance: wikilink
+  - target_id: asian-diasporic-arts
+    relation_type: supports
+    narrative_act: ketsu
+    confidence: 0.3
+    provenance: wikilink
+community_id: 7
+updated: 2026-04-19T04:15:39.756Z
+---
 [[park-sunyoung-2020]] argues that "postcolonialism is a new paradigm that emphasizes the entanglements and interdependency between science fiction and imperialism."
 
 Two key themes in postcolonial theory: the discursive construction of nationhood and the equally discursive negotiation of racial and ethnic identities

@@ -27,13 +27,13 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "dayfly-angel-island/characters/motome-kimura.md",
+                "file": "Clippings/ICE Is Expanding Across the US at Breakneck Speed. Here’s Where It’s Going Next.md",
                 "mode": "preview",
                 "source": false,
                 "backlinks": false
               },
               "icon": "lucide-file",
-              "title": "motome-kimura"
+              "title": "ICE Is Expanding Across the US at Breakneck Speed. Here’s Where It’s Going Next"
             }
           },
           {
@@ -186,17 +186,17 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "dayfly-angel-island/picture-bride-sashin-kekkon.md",
+                "file": "Clippings/ICE Is Expanding Across the US at Breakneck Speed. Here’s Where It’s Going Next.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
               },
               "icon": "lucide-list",
-              "title": "Outline of picture-bride-sashin-kekkon"
+              "title": "Outline of ICE Is Expanding Across the US at Breakneck Speed. Here’s Where It’s Going Next"
             }
           },
           {
-            "id": "3c279167eb92fc0b",
+            "id": "0738a10c29908d91",
             "type": "leaf",
             "state": {
               "type": "zettlebank-sidebar",
@@ -210,7 +210,7 @@
       }
     ],
     "direction": "horizontal",
-    "width": 568.5
+    "width": 520.5
   },
   "left-ribbon": {
     "hiddenItems": {
@@ -220,38 +220,39 @@
       "daily-notes:Open today's daily note": false,
       "command-palette:Open command palette": false,
       "bases:Create new base": false,
-      "zettlebank:ZettleBank": false
+      "zettlebank:ZettleBank": false,
+      "obsidian42-brat:BRAT": false
     }
   },
-  "active": "3c279167eb92fc0b",
+  "active": "0738a10c29908d91",
   "lastOpenFiles": [
+    "Clippings/Interdisciplinary artist Yo-Yo Lin on the process of processing – The Creative Independent.md",
+    "veiling-etymology.md",
+    "undercommons-recognition.md",
+    "third-world-solidarity-to-intersectional-feminism.md",
+    "third-space-as-ritual.md",
+    "repair-and-waste.md",
+    "sexual-violence-and-abstinence.md",
+    "phantasmal-media.md",
+    "jazz-and-psychic-fracture.md",
+    "rituals-of-reproduction.md",
+    "harem-etymology.md",
+    "indigenous-models.md",
+    "annas-archive.md",
+    "dayfly-angel-island/characters/yasuda-kitano.md",
+    "amok-rahman.md",
+    "asian-diasporic-arts.md",
+    "dayfly-angel-island/characters/motome-kimura.md",
     "notes/amok-and-indigenous-violence.md",
     "dayfly-angel-island/los-angeles-womens-organizations.md",
-    "dayfly-angel-island/characters/motome-kimura.md",
     "Untitled.canvas",
     "tattoo-as-kinship-practice.md",
-    "amok-rahman.md",
-    "third-world-solidarity-to-intersectional-feminism.md",
     "waiting-as-female-embodiment.md",
     "SF-and-imperialism.md",
     "amok-and-indigenous-violence.md",
     "shanzahi-china.md",
     "unhomely-and-ai.md",
     "the-mechanical-uncanny.md",
-    "tescreal-bundle.md",
-    "khmer-tiger-spirit.md",
-    "mestiza-as-cultural-figure.md",
-    "shanzhai-vs-innovation-economy.md",
-    "intimacy-father-and-son.md",
-    "third-space-of-ennunciation.md",
-    "rituals-of-reproduction.md",
-    "multiplicity-of-voice.md",
-    "Frankenstein-and-reproductive-trauma.md",
-    "the-practice-of-sentience.md",
-    "practices-of-survivance.md",
-    "1970s-korean-science-fiction.md",
-    "jazz-and-psychic-fracture.md",
-    "third-space-as-liminality.md",
     "Untitled.base",
     "dayfly-angel-island/websites",
     "dayfly-angel-island/e-books",

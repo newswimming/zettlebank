@@ -1,3 +1,59 @@
+---
+tags:
+  - topic/Korean_Shamanic_Practice
+  - topic/Spirit_Violence_Rituals
+  - aspect/character/korean
+  - aspect/character/han
+  - aspect/character/shamanism
+  - aspect/object/kister-2013
+  - aspect/place/koreas
+  - aspect/place/korea
+  - aspect/time/post-war-split-of-korea
+  - affect/mu
+smart_relations:
+  - target_id: amok-rahman
+    relation_type: supports
+    narrative_act: ketsu
+    confidence: 0.754
+    provenance: sc_embedding
+  - target_id: madangguk-as-ritual-and-protest
+    relation_type: supports
+    narrative_act: ketsu
+    confidence: 0.747
+    provenance: sc_embedding
+  - target_id: shamanism-and-healing-practice
+    relation_type: supports
+    narrative_act: ketsu
+    confidence: 0.745
+    provenance: sc_embedding
+  - target_id: asian-diasporic-arts
+    relation_type: supports
+    narrative_act: ketsu
+    confidence: 0.718
+    provenance: sc_embedding
+  - target_id: rituals-of-reproduction
+    relation_type: supports
+    narrative_act: ketsu
+    confidence: 0.703
+    provenance: sc_embedding
+  - target_id: amok-and-indigenous-violence
+    relation_type: motivates
+    narrative_act: sho
+    confidence: 0.688
+    provenance: sc_embedding
+  - target_id: shonien-hospital-los-angeles
+    relation_type: contradicts
+    narrative_act: ten
+    confidence: 0.592
+    provenance: sc_embedding
+  - target_id: third-world-solidarity-to-intersectional-feminism
+    relation_type: supports
+    narrative_act: ketsu
+    confidence: 0.684
+    provenance: sc_embedding
+community_id: 1
+updated: 2026-04-19T04:15:43.114Z
+---
 
 
 

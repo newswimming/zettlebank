@@ -1,3 +1,54 @@
+---
+tags:
+  - topic/Indigenous_Knowledge_Systems
+  - aspect/character/nft
+  - aspect/character/lucy-mcrae-futurekin
+  - aspect/character/kanye
+  - aspect/object/carry-that-weight
+  - aspect/place/mexico-city-planting
+  - aspect/place/europe
+  - aspect/time/40-minutes
+  - aspect/time/thursday
+  - aspect/time/afternoon
+smart_relations:
+  - target_id: practices-of-survivance
+    relation_type: supports
+    narrative_act: ketsu
+    confidence: 0.705
+    provenance: sc_embedding
+  - target_id: rituals-embody-political-violence
+    relation_type: supports
+    narrative_act: ki
+    confidence: 0.703
+    provenance: sc_embedding
+  - target_id: spiritual-kin-and-special-networks
+    relation_type: supports
+    narrative_act: sho
+    confidence: 0.694
+    provenance: sc_embedding
+  - target_id: asian-diasporic-arts
+    relation_type: supports
+    narrative_act: sho
+    confidence: 0.679
+    provenance: sc_embedding
+  - target_id: third-world-solidarity-to-intersectional-feminism
+    relation_type: potential_to
+    narrative_act: sho
+    confidence: 0.676
+    provenance: sc_embedding
+  - target_id: japanese-vernacular
+    relation_type: potential_to
+    narrative_act: ten
+    confidence: 0.539
+    provenance: sc_embedding
+  - target_id: madangguk-as-ritual-and-protest
+    relation_type: supports
+    narrative_act: ketsu
+    confidence: 0.666
+    provenance: sc_embedding
+community_id: 2
+updated: 2026-04-19T04:15:31.654Z
+---
 I only listened to 40 minutes of it
 Wow, I guess even though we spent thursday afternoon together it wasn't on the same wavelength
 meanwhile i listened to fm forest two or three times through- they don't make other albums

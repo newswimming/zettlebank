@@ -1,3 +1,54 @@
+---
+tags:
+  - topic/Indigenous_Art_Science
+  - aspect/character/van-leeuwen-2013
+  - aspect/time/musser-2024
+  - affect/mu
+  - code/ten-9
+smart_relations:
+  - target_id: unhomely-and-ai
+    relation_type: supports
+    narrative_act: ketsu
+    confidence: 0.762
+    provenance: sc_embedding
+  - target_id: VR-as-techno-utopia
+    relation_type: potential_to
+    narrative_act: ketsu
+    confidence: 0.704
+    provenance: sc_embedding
+  - target_id: multiplicity-of-voice
+    relation_type: supports
+    narrative_act: ketsu
+    confidence: 0.701
+    provenance: sc_embedding
+  - target_id: rituals-of-reproduction
+    relation_type: supports
+    narrative_act: ketsu
+    confidence: 0.694
+    provenance: sc_embedding
+  - target_id: the-virtuality-of-rite
+    relation_type: supports
+    narrative_act: ketsu
+    confidence: 0.689
+    provenance: sc_embedding
+  - target_id: amok-rahman
+    relation_type: supports
+    narrative_act: ki
+    confidence: 0.683
+    provenance: sc_embedding
+  - target_id: tescreal-bundle
+    relation_type: related
+    narrative_act: sho
+    confidence: 0.674
+    provenance: sc_embedding
+  - target_id: 1970s-korean-science-fiction
+    relation_type: related
+    narrative_act: ten
+    confidence: 0.623
+    provenance: sc_embedding
+community_id: 1
+updated: 2026-04-19T04:16:38.061Z
+---
 
 shadows and noise
 [[musser-2024]]

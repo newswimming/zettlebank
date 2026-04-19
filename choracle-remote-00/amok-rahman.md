@@ -1,14 +1,5 @@
 ---
 tags:
-  - Theme/Rituals Embody Political Violence
-  - Scene/Madangguk As Ritual And Protest
-  - Scene/Rituals Embody Political Violence
-  - Motif/Third World Solidarity To Intersectional Feminism
-  - Motif/Third Space Of Ennunciation
-  - Motif/Madangguk As Ritual And Protest
-  - Motif/Unhomely And Ai
-  - Motif/Rituals Embody Political Violence
-  - Scene/Amok Rahman
 smart_relations:
   - link: third-world-solidarity-to-intersectional-feminism
     type: motivates
