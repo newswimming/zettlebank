@@ -1,1 +1,9 @@
-{"id":"zettlebank","name":"ZettleBank","version":"4.2.1","minAppVersion":"1.0.0","description":"Narrative intelligence sidebar â€” extracts Topics, Emotions, Character Arcs, and Story Beats via a local FastAPI backend.","author":"ZettleBank","isDesktopOnly":true}
+{
+	"id": "zettlebank",
+	"name": "ZettleBank",
+	"version": "4.3.0",
+	"minAppVersion": "1.0.0",
+	"description": "Narrative intelligence sidebar \u00e2\u20ac\u201d extracts Topics, Emotions, Character Arcs, and Story Beats via a local FastAPI backend.",
+	"author": "ZettleBank",
+	"isDesktopOnly": true
+}

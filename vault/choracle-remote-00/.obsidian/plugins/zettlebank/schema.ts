@@ -95,8 +95,24 @@ export type NarrativeAudit = z.infer<typeof NarrativeAuditSchema>;
 export const StructuralHoleSchema = z.object({
 	constraint_score: z.number().min(0).max(1),
 	is_ten_candidate: z.boolean(),
+	ten_trigger: z.string().nullable().default(null),
 });
 export type StructuralHole = z.infer<typeof StructuralHoleSchema>;
+
+// ---------------------------------------------------------------------------
+// WeightSignals — mirrors server.py WeightSignals
+// Decomposed act-weight signals for candidature transparency in Act Map panel.
+// ---------------------------------------------------------------------------
+
+export const WeightSignalsSchema = z.object({
+	community_anchor:    z.string(),
+	constraint_ten_pull: z.number(),
+	place_time_ki_boost: z.number(),
+	character_role:      z.string().nullable().default(null),
+	character_role_act:  z.string().nullable().default(null),
+	neighbor_act_counts: z.record(z.string(), z.number()).default({}),
+});
+export type WeightSignals = z.infer<typeof WeightSignalsSchema>;
 
 export const AnalyzeResponseSchema = z.object({
 	note_id: z.string().min(1),
@@ -110,7 +126,10 @@ export const AnalyzeResponseSchema = z.object({
 	structural_hole: StructuralHoleSchema.default({
 		constraint_score: 1.0,
 		is_ten_candidate: false,
+		ten_trigger: null,
 	}),
+	community_members: z.array(z.string()).default([]),
+	weight_signals: WeightSignalsSchema.nullable().default(null),
 });
 export type AnalyzeResponse = z.infer<typeof AnalyzeResponseSchema>;
 

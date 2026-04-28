@@ -172,8 +172,10 @@ function writeFrontmatter(
 			frontmatter.community_id = approved.community_id;
 		}
 
-		// 5. Timestamp — ISO 8601, platform-agnostic
-		frontmatter.updated = new Date().toISOString();
+		// 5. Timestamps
+		const now = new Date();
+		frontmatter["last updated"] = now.toLocaleDateString("en-CA"); // YYYY-MM-DD
+		frontmatter.updated = now.toISOString();
 	});
 }
 
@@ -271,6 +273,7 @@ class ZettleBankView extends ItemView {
 					onAnalyze: () => this.plugin.analyzeActiveNote(),
 					onApprove: (payload: ApprovedPayload) => this.plugin.approveNote(payload),
 					onPush: () => this.plugin.pushActiveNote(),
+					backendUrl: this.plugin.settings.backendUrl,
 				})
 			)
 		);
@@ -538,7 +541,9 @@ export default class ZettleBankPlugin extends Plugin {
 			if (payload.community_id !== null) {
 				fm.community_id = payload.community_id;
 			}
-			fm.updated = new Date().toISOString();
+			const now = new Date();
+			fm["last updated"] = now.toLocaleDateString("en-CA"); // YYYY-MM-DD
+			fm.updated = now.toISOString();
 		});
 
 		try {
@@ -581,11 +586,11 @@ export default class ZettleBankPlugin extends Plugin {
 				this.settings.backendUrl
 			);
 
-			// Auto-write: suppress watcher for this file, then write frontmatter
+			// Write only the `updated` marker so auto-analysis doesn't re-trigger.
+			// Tags and relations are written only after the user approves in the panel.
 			this._suppressSyncFor(file.path);
-			writeFrontmatter(this.app, file, {
-				metadata:     response.metadata,
-				community_id: response.community_id,
+			this.app.fileManager.processFrontMatter(file, (fm) => {
+				fm.updated = new Date().toISOString();
 			});
 
 			// Keep hash in sync so the next modify event doesn't re-trigger analysis

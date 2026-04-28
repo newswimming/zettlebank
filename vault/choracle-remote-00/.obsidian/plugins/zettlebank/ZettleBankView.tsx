@@ -7,6 +7,7 @@ import type {
 	RelationType,
 	StructuralHole,
 	CommunityTier,
+	WeightSignals,
 } from "./schema";
 
 // ---------------------------------------------------------------------------
@@ -24,6 +25,12 @@ interface SidebarProps {
 	onAnalyze: () => void;
 	onApprove: (payload: ApprovedPayload) => Promise<void>;
 	onPush: () => Promise<void>;
+	backendUrl: string;
+}
+
+interface ActDistribution {
+	total: number;
+	distribution: Record<string, number>;
 }
 
 // ---------------------------------------------------------------------------
@@ -57,6 +64,12 @@ const PROVENANCE_LABEL: Record<string, string> = {
 	sc_embedding: "~ Embedding",
 	wikilink:     "↗ Wiki-link",
 	llm:          "✦ LLM",
+};
+
+const TEN_TRIGGER_LABEL: Record<string, string> = {
+	low_constraint: "structural hole (Burt constraint)",
+	is_pivot:       "narrative pivot flag",
+	symbiote_role:  "symbiote character role",
 };
 
 // ---------------------------------------------------------------------------
@@ -159,7 +172,7 @@ const StructuralCard: FC<{
 	structuralHole: StructuralHole;
 }> = ({ narrativeAct, communityTiers, structuralHole }) => {
 	const act   = ACT_LABELS[narrativeAct] ?? { label: narrativeAct, kanji: "?" };
-	const macro = communityTiers.find((t) => t.resolution === 0.5);
+	const macro = communityTiers.find((t) => t.resolution === 1.0);
 	const micro = communityTiers.find((t) => t.resolution === 2.0);
 
 	return (
@@ -175,7 +188,7 @@ const StructuralCard: FC<{
 
 			{macro && (
 				<div className="zettlebank-structural-row">
-					<span className="zettlebank-structural-key">Macro (γ=0.5)</span>
+					<span className="zettlebank-structural-key">Macro (γ=1.0)</span>
 					<span className="zettlebank-structural-val">{macro.label}</span>
 				</div>
 			)}
@@ -457,20 +470,7 @@ const DescriptionCard: FC<{
 // ActMapPanel — act position, structural freedom, relation flow, vault distribution
 // ---------------------------------------------------------------------------
 
-const ActMapPanel: FC<{ data: AnalyzeResponse | null }> = ({ data }) => {
-	const [dist, setDist] = useState<{
-		total: number;
-		distribution: Record<string, number>;
-	} | null>(null);
-
-	useEffect(() => {
-		fetch("http://localhost:8000/graph/act-distribution", {
-			signal: AbortSignal.timeout(8000),
-		})
-			.then((r) => r.json())
-			.then(setDist)
-			.catch(() => {});
-	}, []);
+const ActMapPanel: FC<{ data: AnalyzeResponse | null; dist: ActDistribution | null }> = ({ data, dist }) => {
 
 	if (!data) {
 		return (
@@ -487,6 +487,9 @@ const ActMapPanel: FC<{ data: AnalyzeResponse | null }> = ({ data }) => {
 
 	// act_weights from backend (soft distribution across 4 acts)
 	const weights = data.act_weights ?? { ki: 0.25, sho: 0.25, ten: 0.25, ketsu: 0.25 };
+	const dominantWeight = weights[act] ?? 0.25;
+	const confidence = dominantWeight > 0.5 ? "Strong" : dominantWeight > 0.35 ? "Moderate" : "Contested";
+	const confidenceColor = dominantWeight > 0.5 ? "var(--color-green)" : dominantWeight > 0.35 ? "var(--text-muted)" : "var(--color-orange)";
 
 	// Count smart_relations by target narrative_act
 	const relsByAct: Record<string, number> = {};
@@ -502,7 +505,12 @@ const ActMapPanel: FC<{ data: AnalyzeResponse | null }> = ({ data }) => {
 			{/* 1. Weighted act position card */}
 			<div className="zettlebank-card" style={{ borderColor: cfg.color }}>
 				<div style={{ display: "flex", justifyContent: "space-between", marginBottom: "6px" }}>
-					<h4 className="zettlebank-card-label" style={{ margin: 0 }}>Act Position</h4>
+					<h4 className="zettlebank-card-label" style={{ margin: 0 }}>
+						Act Position
+						<span style={{ marginLeft: "6px", fontSize: "10px", color: confidenceColor, fontWeight: 400 }}>
+							{confidence}
+						</span>
+					</h4>
 					<span style={{ fontSize: "11px", color: "var(--text-faint)" }}>
 						Community {data.community_id !== null ? `#${data.community_id}` : "—"}
 					</span>
@@ -603,9 +611,54 @@ const ActMapPanel: FC<{ data: AnalyzeResponse | null }> = ({ data }) => {
 					<span style={{ fontSize: "10px", color: "var(--text-faint)" }}>Constrained</span>
 					<span style={{ fontSize: "10px", color: "var(--text-faint)" }}>Free Bridge</span>
 				</div>
+				{data.structural_hole.ten_trigger && (
+					<div style={{ marginTop: "5px", fontSize: "10px", color: "var(--text-faint)" }}>
+						Trigger: {TEN_TRIGGER_LABEL[data.structural_hole.ten_trigger] ?? data.structural_hole.ten_trigger}
+					</div>
+				)}
 			</div>
 
-			{/* 3. Relation flow across acts */}
+			{/* 3. Candidature signals breakdown */}
+			{data.weight_signals && (
+				<div className="zettlebank-card">
+					<h4 className="zettlebank-card-label">Candidature Signals</h4>
+					<div style={{ fontSize: "11px", display: "flex", flexDirection: "column", gap: "3px" }}>
+						<div style={{ display: "flex", justifyContent: "space-between" }}>
+							<span style={{ color: "var(--text-muted)" }}>Community anchor</span>
+							<span style={{ fontFamily: "var(--font-monospace)" }}>{data.weight_signals.community_anchor}</span>
+						</div>
+						<div style={{ display: "flex", justifyContent: "space-between" }}>
+							<span style={{ color: "var(--text-muted)" }}>Constraint 轉 pull</span>
+							<span style={{ fontFamily: "var(--font-monospace)" }}>{data.weight_signals.constraint_ten_pull.toFixed(3)}</span>
+						</div>
+						<div style={{ display: "flex", justifyContent: "space-between" }}>
+							<span style={{ color: "var(--text-muted)" }}>Place/time 起 boost</span>
+							<span style={{ fontFamily: "var(--font-monospace)" }}>{data.weight_signals.place_time_ki_boost.toFixed(3)}</span>
+						</div>
+						{data.weight_signals.character_role && (
+							<div style={{ display: "flex", justifyContent: "space-between" }}>
+								<span style={{ color: "var(--text-muted)" }}>Character role</span>
+								<span style={{ fontFamily: "var(--font-monospace)" }}>
+									{data.weight_signals.character_role}
+									{data.weight_signals.character_role_act && ` → ${data.weight_signals.character_role_act}`}
+								</span>
+							</div>
+						)}
+						{Object.keys(data.weight_signals.neighbor_act_counts).length > 0 && (
+							<div style={{ marginTop: "2px" }}>
+								<span style={{ color: "var(--text-muted)" }}>Neighbor acts: </span>
+								{Object.entries(data.weight_signals.neighbor_act_counts).map(([a, n]) => (
+									<span key={a} style={{ fontFamily: "var(--font-monospace)", marginRight: "6px" }}>
+										{ARC_CFG[a as keyof typeof ARC_CFG]?.kanji ?? a} {n}
+									</span>
+								))}
+							</div>
+						)}
+					</div>
+				</div>
+			)}
+
+			{/* 4. Relation flow across acts */}
 			{hasRelations && (
 				<div className="zettlebank-card">
 					<h4 className="zettlebank-card-label">Relation Flow</h4>
@@ -720,6 +773,9 @@ const ResultsPanel: React.FC<{
 	onApprove: (payload: ApprovedPayload) => Promise<void>;
 }> = ({ data, onApprove }) => {
 
+	// ── Description (user-editable) ──────────────────────────────────────
+	const [description, setDescription] = useState<string>(data.metadata.description ?? "");
+
 	// ── Affect (multi-select: 1–3 values) ────────────────────────────────
 	const initialAffects = new Set(
 		data.metadata.tags
@@ -741,19 +797,8 @@ const ResultsPanel: React.FC<{
 		() => new Set(data.metadata.smart_relations.map((r) => `${r.target_id}::${r.relation_type}`))
 	);
 
-	// ── Community members ─────────────────────────────────────────────────
-	const [communityMembers, setCommunityMembers] = useState<string[] | null>(null);
-	useEffect(() => {
-		if (data.community_id === null) return;
-		fetch(`http://localhost:8000/graph/community/${data.community_id}/members`, {
-			signal: AbortSignal.timeout(6000),
-		})
-			.then((r) => r.json())
-			.then((d) => setCommunityMembers(
-				(d.members as string[]).filter((id) => id !== data.note_id)
-			))
-			.catch(() => {});
-	}, [data.community_id, data.note_id]);
+	// ── Community members — now served directly from AnalyzeResponse ─────
+	const communityMembers = data.community_members ?? [];
 
 	// ── Action state ──────────────────────────────────────────────────────
 	const [approving, setApproving] = useState(false);
@@ -794,7 +839,7 @@ const ResultsPanel: React.FC<{
 					...data.metadata,
 					tags:            approvedTags,
 					smart_relations: approvedRels,
-					description:     data.metadata.description,
+					description:     description.trim() || null,
 				},
 				community_id: data.community_id,
 			});
@@ -854,20 +899,18 @@ const ResultsPanel: React.FC<{
 			</div>
 
 
-			{/* ── Community members ─────────────────────────────────── */}
+			{/* ── Description ───────────────────────────────────────── */}
+		<DescriptionCard value={description} onChange={(v) => { setDescription(v); setSaved(false); }} />
+
+		{/* ── Community members ─────────────────────────────────── */}
 			<div className="zettlebank-card">
 				<h4 className="zettlebank-card-label">
 					Community {data.community_id !== null ? `#${data.community_id}` : "—"}
 				</h4>
-				{communityMembers === null && data.community_id !== null && (
-					<span style={{ fontSize: "var(--font-ui-smaller)", color: "var(--text-faint)" }}>
-						Loading members…
-					</span>
-				)}
-				{communityMembers !== null && communityMembers.length === 0 && (
+				{communityMembers.length === 0 && (
 					<span className="zettlebank-empty">No other notes in this community</span>
 				)}
-				{communityMembers !== null && communityMembers.length > 0 && (
+				{communityMembers.length > 0 && (
 					<div style={{ display: "flex", flexDirection: "column", gap: "2px", marginTop: "4px" }}>
 						{communityMembers.map((id) => (
 							<span
@@ -945,8 +988,22 @@ const ResultsPanel: React.FC<{
 // Root sidebar
 // ---------------------------------------------------------------------------
 
-export function ZettleBankSidebar({ state, onAnalyze, onApprove, onPush }: SidebarProps) {
+export function ZettleBankSidebar({ state, onAnalyze, onApprove, onPush, backendUrl }: SidebarProps) {
 	const [activeTab, setActiveTab] = useState<"analysis" | "map">("analysis");
+	const [dist, setDist] = useState<ActDistribution | null>(null);
+
+	// Fetch act-distribution once on mount
+	useEffect(() => {
+		fetch(`${backendUrl}/graph/act-distribution`, { signal: AbortSignal.timeout(8000) })
+			.then((r) => r.json()).then(setDist).catch(() => {});
+	}, [backendUrl]);
+
+	// Re-fetch whenever an analysis completes so the vault bar stays current
+	useEffect(() => {
+		if (state.phase !== "results") return;
+		fetch(`${backendUrl}/graph/act-distribution`, { signal: AbortSignal.timeout(8000) })
+			.then((r) => r.json()).then(setDist).catch(() => {});
+	}, [backendUrl, state.phase]);
 
 	const tabStyle = (tab: "analysis" | "map"): React.CSSProperties => ({
 		flex: 1,
@@ -1025,7 +1082,7 @@ export function ZettleBankSidebar({ state, onAnalyze, onApprove, onPush }: Sideb
 			)}
 
 			{activeTab === "map" && (
-				<ActMapPanel data={state.phase === "results" ? state.data : null} />
+				<ActMapPanel data={state.phase === "results" ? state.data : null} dist={dist} />
 			)}
 		</div>
 	);
